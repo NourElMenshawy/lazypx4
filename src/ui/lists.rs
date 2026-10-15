@@ -396,7 +396,7 @@ pub fn flight_logs(ctx: &Ctx) -> Vec<Line<'static>> {
     let cursor = session.flight_log_index.min(count - 1);
     let height = ctx.height.saturating_sub(lines.len() + jobs.len()).max(1);
     let start = window_start(cursor, count, height);
-    for (i, e) in st.flight_logs.values().enumerate().skip(start).take(height) {
+    for (i, e) in st.flight_logs_sorted().into_iter().enumerate().skip(start).take(height) {
         let selected = i == cursor;
         let style = if selected { selected_style() } else { Style::new() };
         let row = format!("{:06}  {:<26}{:>12}", e.id, e.time_string(), e.size_string());

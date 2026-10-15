@@ -228,7 +228,7 @@ pub fn job_panel(ctx: &Ctx, kind: JobKind) -> Vec<Line<'static>> {
         "RUNNING" | "CANCELLED" => YELLOW,
         "SUCCESS" => GREEN,
         "ERROR" => RED,
-        _ => ratatui::style::Color::DarkGray,
+        _ => OVERLAY0,
     };
     let mut lines = vec![blank(), Ln::new().st(format!("Job: {}", j.status), Style::new().fg(color).add_modifier(Modifier::BOLD)).line()];
     if !j.error.is_empty() {

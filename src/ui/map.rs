@@ -24,7 +24,7 @@ pub fn braille(bits: u8) -> char {
 }
 
 /// Low-to-high colour bands for height / depth, as LiDAR viewers do.
-pub const BANDS: [Color; 5] = [Color::Blue, Color::Cyan, Color::Green, Color::Yellow, Color::Red];
+pub const BANDS: [Color; 5] = [BLUE, CYAN, GREEN, YELLOW, RED];
 
 pub fn band_color(v: f64, lo: f64, hi: f64) -> Color {
     if hi <= lo {
@@ -256,7 +256,7 @@ pub fn draw(ctx: &Ctx) -> Vec<Line<'static>> {
         let bg = if ros.gps_feedback_ok { GREEN } else { RED };
         lines.push(Line::from(Span::styled(
             format!(" [P] GPS {} ", ros.gps_feedback),
-            Style::new().bg(bg).fg(Color::Black).add_modifier(Modifier::BOLD),
+            Style::new().bg(bg).fg(CRUST).add_modifier(Modifier::BOLD),
         )));
     }
     let arm = if st.armed { Ln::new().fg("ARMED", GREEN) } else { Ln::new().dim("DISARMED") };
@@ -268,7 +268,7 @@ pub fn draw(ctx: &Ctx) -> Vec<Line<'static>> {
                 " JOG ARMED   step {:.2} m / {JOG_YAW_STEP_DEG:.0}°   w/s up·down  k/j fwd·back  a/d strafe  h/l yaw  [/] step  x off ",
                 session.jog_step
             ),
-            Style::new().bg(RED).fg(Color::White).add_modifier(Modifier::BOLD),
+            Style::new().bg(RED).fg(CRUST).add_modifier(Modifier::BOLD),
         )));
         if !st.last_ack.is_empty() {
             lines.push(Ln::new().dim(format!(" last command: {}", st.last_ack)).line());
@@ -546,7 +546,7 @@ pub fn draw(ctx: &Ctx) -> Vec<Line<'static>> {
 
     if navpath.len() >= 2 {
         let cells = grid.braille_polyline(navpath);
-        grid.paint_braille(cells, |_| Style::new().fg(Color::Blue), Layer::Path, &[Layer::Empty, Layer::Fence]);
+        grid.paint_braille(cells, |_| Style::new().fg(BLUE), Layer::Path, &[Layer::Empty, Layer::Fence]);
         // A round trip ends on its start: draw `e` first so `s` stays.
         let (s, e) = (navpath[0], navpath[navpath.len() - 1]);
         grid.marker(e.0, e.1, 'e', bold(RED));
@@ -572,11 +572,11 @@ pub fn draw(ctx: &Ctx) -> Vec<Line<'static>> {
     for (i, w) in waypoints_local.iter().enumerate() {
         if let Some((n, e)) = w {
             let digit = char::from_digit(((i + 1) % 10) as u32, 10).unwrap();
-            grid.marker(*n, *e, digit, bold(Color::Magenta));
+            grid.marker(*n, *e, digit, bold(MAUVE));
         }
     }
     if let Some((n, e)) = queue_target_local {
-        grid.marker(n, e, '◎', bold(Color::White));
+        grid.marker(n, e, '◎', bold(TEXT));
     }
     match home_local {
         Some((n, e)) => grid.marker(n, e, 'H', Style::new().fg(YELLOW)),
@@ -646,7 +646,7 @@ pub fn draw(ctx: &Ctx) -> Vec<Line<'static>> {
             lines.push(
                 Ln::new()
                     .raw(format!(" KML       {kml_name}   waypoints ("))
-                    .st("#", bold(Color::Magenta))
+                    .st("#", bold(MAUVE))
                     .raw(format!("): {}   fence (", k.waypoints.len()))
                     .fg(".", YELLOW)
                     .raw(format!("): {} ring(s)", k.fence_rings.len()))
@@ -670,7 +670,7 @@ pub fn draw(ctx: &Ctx) -> Vec<Line<'static>> {
             lines.push(
                 Ln::new()
                     .raw("   ")
-                    .st(((i + 1) % 10).to_string(), bold(Color::Magenta))
+                    .st(((i + 1) % 10).to_string(), bold(MAUVE))
                     .raw(format!(" {label:<16} local "))
                     .spans(local_text.0)
                     .raw(format!("   global {:.7}, {:.7}   alt {:.1} m", w.lat, w.lon, w.alt))
@@ -705,7 +705,7 @@ pub fn draw(ctx: &Ctx) -> Vec<Line<'static>> {
             lines.push(
                 Ln::new()
                     .raw(" WP QUEUE  ")
-                    .st("◎", bold(Color::White))
+                    .st("◎", bold(TEXT))
                     .raw(format!(
                         " [{}]  {done}/{} -> {}{dist}{}   ",
                         st.wp_queue_mode,
@@ -782,7 +782,7 @@ pub fn draw(ctx: &Ctx) -> Vec<Line<'static>> {
         } else {
             let closed = navpath.len() >= 2 && navpath[0] == navpath[navpath.len() - 1];
             Ln::new()
-                .fg("⣿", Color::Blue)
+                .fg("⣿", BLUE)
                 .raw(format!(" {} pose(s)   ", navpath.len()))
                 .st("s", bold(GREEN))
                 .raw(" start  ")

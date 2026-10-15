@@ -6,7 +6,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 
-use super::GREEN;
+use super::{GREEN, base_style};
 use crate::app::Screen;
 
 type Keys = &'static [(&'static str, &'static str)];
@@ -146,7 +146,7 @@ pub fn draw(frame: &mut Frame, area: Rect, screen: Screen, scroll: &mut usize) {
     let more = if lines.len() > visible { " j/k scroll ·" } else { "" };
     frame.render_widget(Clear, popup);
     frame.render_widget(
-        Paragraph::new(lines).scroll((*scroll as u16, 0)).block(
+        Paragraph::new(lines).style(base_style()).scroll((*scroll as u16, 0)).block(
             Block::bordered()
                 .border_type(BorderType::Rounded)
                 .border_style(Style::new().fg(GREEN))

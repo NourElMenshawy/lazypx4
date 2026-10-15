@@ -609,8 +609,8 @@ impl App {
                 .map(|e| format!("{} {} {}", e.time, e.level.as_str(), e.message))
                 .collect(),
             Screen::FlightLogs => st
-                .flight_logs
-                .values()
+                .flight_logs_sorted()
+                .into_iter()
                 .map(|e| format!("{:06} {} {}", e.id, e.time_string(), e.size_string()))
                 .collect(),
             Screen::Parameters => params::visible_parameters(&st, self.session.param_changed_only)
@@ -1414,7 +1414,7 @@ impl App {
             "HOME" => *i = 0,
             "END" if count > 0 => *i = count - 1,
             "ENTER" if count > 0 => {
-                let entry = st.flight_logs.values().nth((*i).min(count - 1)).cloned().unwrap();
+                let entry = st.flight_logs_sorted()[(*i).min(count - 1)].clone();
                 drop(st);
                 flightlog::start_download(
                     self.link.clone(),

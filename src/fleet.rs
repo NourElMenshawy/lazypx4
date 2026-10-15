@@ -27,7 +27,7 @@ use crate::config::*;
 use crate::link::Link;
 use crate::mav::{commands, flightlog, modes};
 use crate::state::{self, Level, Shared, State, now};
-use crate::ui::{GREEN, RED, YELLOW};
+use crate::ui::{BLUE, CRUST, CYAN, GREEN, OVERLAY0, RED, SURFACE1, YELLOW, base_style};
 
 /// "14560,14561" / "14560-14563" / a mix.
 pub fn parse_ports(text: &str) -> Result<Vec<u16>, String> {
@@ -641,7 +641,7 @@ fn row_data(st: &State, sys: &crate::host::SystemStats, settings: &Settings) -> 
         verdict: if st.vehicle_locked {
             short_verdict(&crate::preflight::checks(st, sys, settings))
         } else {
-            ("--".into(), Color::DarkGray)
+            ("--".into(), OVERLAY0)
         },
         sys: st.target_system,
         locked: st.vehicle_locked,
@@ -665,7 +665,7 @@ fn level_style(level: Level) -> Style {
     match level {
         Level::Failsafe | Level::Error => Style::new().fg(RED),
         Level::Warn => Style::new().fg(YELLOW),
-        Level::Command => Style::new().fg(Color::Cyan),
+        Level::Command => Style::new().fg(CYAN),
         _ => Style::new().add_modifier(Modifier::DIM),
     }
 }
@@ -680,6 +680,8 @@ fn draw(frame: &mut ratatui::Frame, fleet: &mut Fleet) {
         Constraint::Length(prompt_rows),
     ])
     .areas(frame.area());
+    let full = frame.area();
+    frame.buffer_mut().set_style(full, base_style());
     let flash = (now() * 2.0) as i64 % 2 == 0;
     let dim = Style::new().add_modifier(Modifier::DIM);
 
@@ -694,10 +696,10 @@ fn draw(frame: &mut ratatui::Frame, fleet: &mut Fleet) {
         .zip(&data)
         .enumerate()
         .map(|(i, (slot, d))| {
-            let mark = if fleet.marked[i] { Span::styled("●", Style::new().fg(Color::Cyan)) } else { Span::raw(" ") };
+            let mark = if fleet.marked[i] { Span::styled("●", Style::new().fg(CYAN)) } else { Span::raw(" ") };
             let Some(d) = d else {
                 let (link, style, text) = if slot.opened {
-                    ("OPEN", Style::new().fg(Color::Cyan), "full lazypx4 running on this port".to_string())
+                    ("OPEN", Style::new().fg(CYAN), "full lazypx4 running on this port".to_string())
                 } else {
                     ("ERROR", Style::new().fg(RED), slot.error.clone())
                 };
@@ -757,12 +759,12 @@ fn draw(frame: &mut ratatui::Frame, fleet: &mut Fleet) {
                 Cell::from(d.alt.map(|a| format!("{a:.1} m")).unwrap_or_else(|| "--".into())),
                 Cell::from(text),
             ]);
-            if d.alert.is_some() && flash { row.style(Style::new().bg(Color::Rgb(90, 0, 0))) } else { row }
+            if d.alert.is_some() && flash { row.style(Style::new().bg(SURFACE1)) } else { row }
         })
         .collect();
 
     let header = Row::new(["", "PORT", "SYS", "LINK", "ARMED", "PREFLIGHT", "MODE", "BATTERY", "GPS", "ALT", "LAST REPLY / WARNING / ALERT"])
-        .style(Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+        .style(Style::new().fg(CYAN).add_modifier(Modifier::BOLD));
     let widths = [
         Constraint::Length(1),
         Constraint::Length(6),
@@ -848,7 +850,7 @@ fn draw(frame: &mut ratatui::Frame, fleet: &mut Fleet) {
                 fleet.slots[j.row].label(),
                 j.step
             ),
-            Style::new().bg(YELLOW).fg(Color::Black).add_modifier(Modifier::BOLD),
+            Style::new().bg(YELLOW).fg(CRUST).add_modifier(Modifier::BOLD),
         )],
         None => vec![Span::styled(
             " [a]rm [d]isarm [T]akeoff [L]and [R]TL [h]old [g]oto [x]jog [m]ode o[F]fboard [H]ome [E]KF [b]reboot [K]ill · [y] preflight · SPACE mark · ENTER full UI · [A]ck · q",
@@ -861,7 +863,7 @@ fn draw(frame: &mut ratatui::Frame, fleet: &mut Fleet) {
     frame.render_widget(Paragraph::new(Line::from(bar)), keys);
 
     if let Some(p) = &fleet.prompt {
-        let bar = Style::new().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD);
+        let bar = Style::new().bg(BLUE).fg(CRUST).add_modifier(Modifier::BOLD);
         let lines = match p {
             Prompt::Confirm { text, buffer, .. } => vec![
                 Line::from(vec![Span::styled(" CONFIRM ", bar), Span::raw("  "), Span::raw(text.clone()).bold()]),

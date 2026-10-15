@@ -47,7 +47,7 @@ pub fn sparkline(values: &[f64]) -> (String, f64, f64) {
 /// Condense the estimator flags into one coloured verdict.
 pub fn ekf_summary(flags: u32, is_estimator_status: bool, status: &str) -> (String, Color) {
     if flags == 0 {
-        return if status == "OK" { ("OK".into(), GREEN) } else { (status.into(), Color::DarkGray) };
+        return if status == "OK" { ("OK".into(), GREEN) } else { (status.into(), OVERLAY0) };
     }
     let has_att = flags & 1 != 0;
     let has_vel_h = flags & 2 != 0;

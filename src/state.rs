@@ -631,6 +631,13 @@ impl State {
             .filter(|v| v.is_finite())
     }
 
+    /// Flight logs newest first: by date and time, then by id (undated logs last).
+    pub fn flight_logs_sorted(&self) -> Vec<&FlightLogEntry> {
+        let mut logs: Vec<&FlightLogEntry> = self.flight_logs.values().collect();
+        logs.sort_by_key(|e| std::cmp::Reverse((e.time_utc, e.id)));
+        logs
+    }
+
     pub fn trail_push(&mut self, x: f64, y: f64) {
         let far_enough = match self.position_trail.back() {
             None => true,

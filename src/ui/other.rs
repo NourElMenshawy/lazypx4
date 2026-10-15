@@ -1,7 +1,7 @@
 //! Page-style screens: control / RC, sensor calibration, about, and the
 //! placeholder for screens not ported from the Python version yet.
 
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 
 use super::*;
@@ -350,7 +350,7 @@ const LOGO: [&str; 4] = [
 
 pub fn about() -> Vec<Line<'static>> {
     let logo = Style::new().fg(CYAN).add_modifier(Modifier::BOLD);
-    let link = Style::new().fg(Color::Magenta);
+    let link = Style::new().fg(MAUVE);
     let mut lines = vec![blank()];
     lines.extend(LOGO.iter().map(|row| Ln::new().raw("  ").st(*row, logo).line()));
     lines.push(blank());

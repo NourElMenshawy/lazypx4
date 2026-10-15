@@ -23,10 +23,23 @@ use crate::app::{App, NAV_ITEMS, Screen};
 use crate::config::*;
 use crate::state::{self, State};
 
-pub const GREEN: Color = Color::Green;
-pub const YELLOW: Color = Color::Yellow;
-pub const RED: Color = Color::Red;
-pub const CYAN: Color = Color::Cyan;
+// Catppuccin Macchiato palette.
+pub const GREEN: Color = Color::Rgb(0xa6, 0xda, 0x95);
+pub const YELLOW: Color = Color::Rgb(0xee, 0xd4, 0x9f);
+pub const RED: Color = Color::Rgb(0xed, 0x87, 0x96);
+pub const CYAN: Color = Color::Rgb(0x91, 0xd7, 0xe3); // sky
+pub const BLUE: Color = Color::Rgb(0x8a, 0xad, 0xf4);
+pub const MAUVE: Color = Color::Rgb(0xc6, 0xa0, 0xf6);
+pub const TEXT: Color = Color::Rgb(0xca, 0xd3, 0xf5);
+pub const OVERLAY0: Color = Color::Rgb(0x6e, 0x73, 0x8d);
+pub const SURFACE1: Color = Color::Rgb(0x49, 0x4d, 0x64);
+pub const BASE: Color = Color::Rgb(0x24, 0x27, 0x3a);
+pub const CRUST: Color = Color::Rgb(0x18, 0x19, 0x26);
+
+/// Whole-screen default: Macchiato text on base.
+pub fn base_style() -> Style {
+    Style::new().fg(TEXT).bg(BASE)
+}
 
 /// Small span builder so screens read like the Python f-strings they port.
 #[derive(Default)]
@@ -120,7 +133,7 @@ pub fn level_color(level: state::Level) -> Style {
 
 pub fn armed_span(armed: bool) -> Span<'static> {
     if armed {
-        Span::styled(" ARMED ", Style::new().bg(GREEN).fg(Color::Black).add_modifier(Modifier::BOLD))
+        Span::styled(" ARMED ", Style::new().bg(GREEN).fg(CRUST).add_modifier(Modifier::BOLD))
     } else {
         Span::styled(" DISARMED ", Style::new().add_modifier(Modifier::DIM))
     }
@@ -185,6 +198,7 @@ pub struct Ctx<'a> {
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
+    frame.buffer_mut().set_style(area, base_style());
     if area.width < MIN_TERMINAL_COLS || area.height < MIN_TERMINAL_ROWS {
         frame.render_widget(
             Paragraph::new(vec![
@@ -324,7 +338,7 @@ fn draw_sidebar(frame: &mut Frame, app: &App, st: &State, area: Rect) {
         format!("REPLAY {state} {:02}:{:02}", pos / 60, pos % 60)
     });
     let link = if let Some(text) = replay {
-        Span::styled(text, Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        Span::styled(text, Style::new().fg(CYAN).add_modifier(Modifier::BOLD))
     } else if st.connected {
         Span::styled("CONNECTED", Style::new().fg(GREEN))
     } else if st.vehicle_locked {
@@ -372,7 +386,7 @@ fn draw_sidebar(frame: &mut Frame, app: &App, st: &State, area: Rect) {
             let current = *screen == app.session.screen;
             let selected = focused && i == app.session.nav_index;
             let style = if selected {
-                Style::new().bg(GREEN).fg(Color::Black).add_modifier(Modifier::BOLD)
+                Style::new().bg(GREEN).fg(CRUST).add_modifier(Modifier::BOLD)
             } else if current {
                 Style::new().fg(GREEN).add_modifier(Modifier::BOLD)
             } else {
@@ -395,7 +409,7 @@ fn draw_alert_banner(frame: &mut Frame, st: &State, area: Rect) {
     let Some((time, text)) = st.alerts.last() else { return };
     let on = (crate::state::now() * 2.0) as i64 % 2 == 0;
     let style = if on {
-        Style::new().bg(RED).fg(Color::White).add_modifier(Modifier::BOLD)
+        Style::new().bg(RED).fg(CRUST).add_modifier(Modifier::BOLD)
     } else {
         Style::new().fg(RED).add_modifier(Modifier::BOLD)
     };
@@ -418,7 +432,7 @@ fn draw_keybar(frame: &mut Frame, area: Rect, footer: &str, scroll_note: &str) {
 }
 
 fn draw_prompt(frame: &mut Frame, app: &App, area: Rect) {
-    let bar = Style::new().bg(Color::Blue).fg(Color::White).add_modifier(Modifier::BOLD);
+    let bar = Style::new().bg(BLUE).fg(CRUST).add_modifier(Modifier::BOLD);
     let lines = if app.session.cmd_active {
         let edit = &app.session.cmd_edit;
         let before: String = edit.text[..edit.cursor].iter().collect();

@@ -1,6 +1,6 @@
 //! [y] preflight go / no-go (the checks live in `preflight.rs`).
 
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 
 use super::*;
@@ -21,9 +21,9 @@ pub fn draw(ctx: &Ctx) -> Vec<Line<'static>> {
 pub fn check_lines(checks: &[preflight::Check]) -> Vec<Line<'static>> {
     let (worst, _, _) = preflight::verdict(checks);
     let banner = match worst {
-        Status::Fail => Style::new().bg(RED).fg(Color::White),
-        Status::Warn => Style::new().bg(YELLOW).fg(Color::Black),
-        _ => Style::new().bg(GREEN).fg(Color::Black),
+        Status::Fail => Style::new().bg(RED).fg(CRUST),
+        Status::Warn => Style::new().bg(YELLOW).fg(CRUST),
+        _ => Style::new().bg(GREEN).fg(CRUST),
     }
     .add_modifier(Modifier::BOLD);
 
