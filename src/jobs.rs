@@ -1,8 +1,8 @@
 //! Background subprocess jobs: firmware flashing (`px_uploader.py`), the
-//! .ulog web upload (`upload_log.py`) and the ecl_ekf health check
+//! .ulog upload to Flight Review v2 (`curl`) and the ecl_ekf health check
 //! (`process_logdata_ekf.py`). Mirrors `jobs.py` + `pxtools.py`.
 //!
-//! These stay real PX4 tool scripts run under Python - they're manual,
+//! Flashing and the EKF check stay real PX4 tool scripts run under Python - they're manual,
 //! occasional actions, and reimplementing a bootloader protocol or the
 //! ecl_ekf analysis buys nothing. One job slot is shared by all three.
 
@@ -252,16 +252,6 @@ pub fn start_firmware_flash(jobs: &Jobs, shared: &Shared, tools_dir: &str, firmw
 // .ulog upload / ecl_ekf check
 // ---------------------------------------------------------------------------
 
-fn git_email() -> String {
-    Command::new("git")
-        .args(["config", "--global", "user.email"])
-        .stderr(Stdio::null())
-        .output()
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default()
-}
-
 /// Best-effort copy to the clipboard: wl-copy (Wayland), else xclip.
 fn copy_to_clipboard(text: &str) -> bool {
     for (bin, args) in [("wl-copy", &[][..]), ("xclip", &["-selection", "clipboard"][..])] {
@@ -279,32 +269,34 @@ fn copy_to_clipboard(text: &str) -> bool {
     false
 }
 
-pub fn start_ulog_upload(jobs: &Jobs, shared: &Shared, tools_dir: &str, server: &str, log: &Path) -> bool {
-    let script = Path::new(tools_dir).join("upload_log.py");
-    if !script.is_file() {
-        state::lock(shared).error(format!("upload_log.py not found under {tools_dir}"));
-        return false;
-    }
-    let mut cmd = Command::new(tool_python(tools_dir));
-    cmd.arg(&script)
-        .args(["--quiet", "--server", server, "--description", "", "--feedback", "", "--source", "lazypx4"]);
-    let email = git_email();
-    if !email.is_empty() {
-        cmd.args(["--email", &email]);
-    }
-    cmd.arg(log);
+/// Upload a .ulg to a Flight Review v2 server (`POST <server>/api/upload`)
+/// with curl, then copy the log's page URL (`<server>/log/<id>`).
+pub fn start_ulog_upload(jobs: &Jobs, shared: &Shared, server: &str, log: &Path) -> bool {
+    let mut file_arg = std::ffi::OsString::from("file=@");
+    file_arg.push(log);
+    let mut cmd = Command::new("curl");
+    cmd.args(["--silent", "--show-error", "--fail-with-body", "-X", "POST"])
+        .arg("-F")
+        .arg(file_arg)
+        .args(["-F", "source=lazypx4", "-F", "is_public=false"])
+        .arg(format!("{server}/api/upload"));
 
-    let on_success: OnSuccess = Box::new(|output, shared| {
-        let url = output
-            .split("URL:")
-            .nth(1)
-            .and_then(|rest| rest.split_whitespace().next())
-            .ok_or("upload_log.py did not report a plot URL")?
-            .to_string();
+    let base = server.to_string();
+    let on_success: OnSuccess = Box::new(move |output, shared| {
+        let reply: serde_json::Value = output
+            .lines()
+            .find_map(|line| serde_json::from_str(line.trim()).ok())
+            .ok_or("Flight Review did not return a JSON reply")?;
+        let id = reply["id"].as_str().ok_or("Flight Review reply has no log id")?;
+        let url = format!("{base}/log/{id}");
+        let mut st = state::lock(shared);
         if copy_to_clipboard(&url) {
-            state::lock(shared).info(format!("Log report URL copied to clipboard: {url}"));
+            st.info(format!("Log report URL copied to clipboard: {url}"));
         } else {
-            state::lock(shared).warn("Could not copy the URL to the clipboard (wl-copy / xclip)");
+            st.warn("Could not copy the URL to the clipboard (wl-copy / xclip)");
+        }
+        if let Some(token) = reply["delete_token"].as_str() {
+            st.info(format!("Delete token for {id}: {token}"));
         }
         Ok(url)
     });

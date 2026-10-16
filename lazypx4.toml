@@ -15,9 +15,12 @@
 # param_defaults = "build/px4_sitl_default/parameters.json"
 # map_dir = "./px4_maps"            # satellite snapshots
 # firmware_dir = "./px4_firmware"   # .px4 files for [f]
-# tools_dir = "./Tools"             # px_uploader.py / upload_log.py / ecl_ekf
+# tools_dir = "./Tools"             # px_uploader.py / ecl_ekf
 # disk_path = "/"                   # filesystem shown on the dashboard HOST line
 # kml = "mission.kml"               # map overlay loaded at start-up
+
+[upload]
+# server = "https://v2.logs.px4.io" # Flight Review v2 server [u] uploads .ulg logs to
 
 [ros]
 # lidar_topic = "/livox/points"

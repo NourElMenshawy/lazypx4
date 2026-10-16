@@ -78,10 +78,15 @@ struct Cli {
     #[arg(long, value_name = "DIR")]
     firmware_dir: Option<String>,
 
-    /// Directory containing px_uploader.py / upload_log.py / ecl_ekf
+    /// Directory containing px_uploader.py / ecl_ekf
     /// [default: ./Tools, else the Tools/ of the repo it was built from]
     #[arg(long, value_name = "DIR")]
     tools_dir: Option<String>,
+
+    /// Flight Review v2 server [u] uploads flight logs to
+    /// [default: https://v2.logs.px4.io]
+    #[arg(long, value_name = "URL")]
+    upload_server: Option<String>,
 
     /// Load a .kml file as the map's fence/waypoint overlay on start-up
     #[arg(long, value_name = "FILE")]
@@ -194,7 +199,9 @@ fn main() -> std::process::ExitCode {
         disk_path: pick(cli.disk_path, paths.disk_path, "/"),
         firmware_dir: pick(cli.firmware_dir, paths.firmware_dir, "./px4_firmware"),
         tools_dir: cli.tools_dir.or(paths.tools_dir).unwrap_or_else(default_tools_dir),
-        ulog_upload_server: "https://logs.px4.io".into(),
+        ulog_upload_server: pick(cli.upload_server, file.upload.server, "https://v2.logs.px4.io")
+            .trim_end_matches('/')
+            .to_string(),
         kml_path: cli.kml.or(paths.kml),
         lidar_topic: pick(cli.lidar_topic, ros.lidar_topic, "/livox/points"),
         navpath_topic: pick(cli.navpath_topic, ros.navpath_topic, "/navsat_utm_path"),

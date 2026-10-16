@@ -26,8 +26,9 @@ pub struct Settings {
     pub disk_path: String,
     /// Directory scanned for .px4 files on the flash-firmware screen.
     pub firmware_dir: String,
-    /// px_uploader.py / upload_log.py / ecl_ekf live here.
+    /// px_uploader.py / ecl_ekf live here.
     pub tools_dir: String,
+    /// Flight Review v2 server [u] uploads .ulg logs to.
     pub ulog_upload_server: String,
     /// .kml to load as the map overlay at start-up (like pressing [o]).
     pub kml_path: Option<String>,
@@ -66,6 +67,7 @@ pub struct FileConfig {
     pub safety: SafetyFile,
     pub alerts: AlertsFile,
     pub fleet: FleetFile,
+    pub upload: UploadFile,
     /// heading -> parameter names, in file order.
     pub key_params: Option<toml::Table>,
     pub keys: std::collections::BTreeMap<String, String>,
@@ -108,6 +110,13 @@ pub struct SafetyFile {
     pub allow_log_download_while_armed: Option<bool>,
     pub battery_low: Option<f64>,
     pub battery_critical: Option<f64>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct UploadFile {
+    /// Flight Review v2 base URL ([u] posts to `<server>/api/upload`).
+    pub server: Option<String>,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
