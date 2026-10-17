@@ -11,7 +11,7 @@ const STICK_WIDTH: usize = 19;
 const STICK_HEIGHT: usize = 9;
 const BAR_WIDTH: usize = 32;
 
-fn age(last: f64) -> Ln {
+pub(super) fn age(last: f64) -> Ln {
     if last == 0.0 {
         return Ln::new().dim("never");
     }
@@ -20,7 +20,7 @@ fn age(last: f64) -> Ln {
     Ln::new().fg(format!("{d:.1}s"), c)
 }
 
-fn section_with(title: &str, note: Ln) -> Line<'static> {
+pub(super) fn section_with(title: &str, note: Ln) -> Line<'static> {
     let mut spans = section(title, "").spans;
     spans.push(ratatui::text::Span::raw(" "));
     spans.extend(note.0);

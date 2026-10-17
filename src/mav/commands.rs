@@ -246,7 +246,7 @@ pub fn send_rtl(link: &Link, shared: &Shared) -> bool {
     )
 }
 
-fn command_int(link: &Link, frame: mav::MavFrame, command: MavCmd, params: [f32; 4], x: i32, y: i32, z: f32) -> bool {
+pub(crate) fn command_int(link: &Link, frame: mav::MavFrame, command: MavCmd, params: [f32; 4], x: i32, y: i32, z: f32) -> bool {
     let (target_system, target_component) = link.target();
     link.send(&MavMessage::COMMAND_INT(mav::COMMAND_INT_DATA {
         param1: params[0],

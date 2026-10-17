@@ -15,6 +15,8 @@ pub struct HostRun(pub Option<String>);
 
 const PARAM_SUBCOMMANDS: &[&str] = &["get", "set", "save", "load", "refresh"];
 const FENCE_WORDS: &[&str] = &["n", "w", "h", "r", "t", "upload"];
+const GIMBAL_WORDS: &[&str] = &["center", "nadir", "roi", "lock", "control"];
+const WINCH_WORDS: &[&str] = &["relax", "lock", "deliver", "hold", "retract", "len", "rate"];
 
 impl App {
     pub(crate) fn open_cmdline(&mut self) {
@@ -95,6 +97,13 @@ impl App {
             ("kml", 1) => cmdline::complete_path(word, "."),
             ("diff", 1 | 2) => cmdline::complete_path(word, &self.settings.param_dir),
             ("replay", 1) => cmdline::prefix_matches(word, ["pause", "resume", "speed"]),
+            ("gimbal", 1) => cmdline::prefix_matches(word, GIMBAL_WORDS.iter().copied()),
+            ("gimbal", 2) if words[1] == "roi" => cmdline::prefix_matches(word, ["none"]),
+            ("gimbal", 2) if words[1] == "lock" => cmdline::prefix_matches(word, ["on", "off"]),
+            ("photo", 1) => cmdline::prefix_matches(word, ["stop"]),
+            ("video", 1) => cmdline::prefix_matches(word, ["start", "stop"]),
+            ("grip", 1) => cmdline::prefix_matches(word, ["grab", "release"]),
+            ("winch", 1) => cmdline::prefix_matches(word, WINCH_WORDS.iter().copied()),
             ("help", 1) => cmdline::prefix_matches(word, COMMANDS.iter().map(|c| c.name)),
             _ => Vec::new(),
         };
@@ -277,6 +286,17 @@ impl App {
                 shell::send_command(&self.link, &mut st, &args);
                 st.command(format!("nsh> {args}   (output on [t])"));
             }
+            "gimbal" if !args.is_empty() => self.cmd_gimbal(&args),
+            "photo" => self.cmd_photo(&args),
+            "video" => match args_v.as_slice() {
+                [] => self.cmd_video(None),
+                ["start"] => self.cmd_video(Some(true)),
+                ["stop"] => self.cmd_video(Some(false)),
+                _ => usage(self),
+            },
+            "grip" if !args.is_empty() => self.gripper_submit(&args),
+            "winch" if !args.is_empty() => self.winch_submit(&args),
+            "actuator" if !args.is_empty() => self.actuator_submit(&args),
             "!" if !args.is_empty() => self.request_host_run(Some(args)),
             "sh" => self.request_host_run(None),
             "help" => self.cmd_help(args_v.first().copied()),

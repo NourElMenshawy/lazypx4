@@ -170,6 +170,7 @@ impl App {
                 st.map_pan = (0.0, 0.0);
             }
             "B" => st.map_lidar_frame = st.map_lidar_frame.next(),
+            "I" => st.map_satellite_hidden = !st.map_satellite_hidden,
             "t" => st.map_trail_enabled = !st.map_trail_enabled,
             "f" => st.map_fit_kml = !st.map_fit_kml,
             "V" => st.map_lidar_enabled = !st.map_lidar_enabled,

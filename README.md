@@ -25,6 +25,7 @@ and [lazydocker](https://github.com/jesseduffield/lazydocker), inspired by
 - **Alerts** — flashing warning and a beep on link loss, low battery or failsafes
 - **Mission map** — see where the drone is, load waypoints and geofences
 - **Parameters, logs, calibration, firmware** — the usual setup tasks, without leaving the terminal
+- **Payload** — aim the gimbal, take photos / video, operate a gripper, winch or spare outputs
 - **Fleet view** — watch and command several drones side by side
 - **Recording & replay** — every session is saved and can be played back later
 - **ROS 2 (optional)** — shows LiDAR scans and planned paths on the map

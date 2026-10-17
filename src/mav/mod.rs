@@ -9,4 +9,5 @@ pub mod mission;
 pub mod handlers;
 pub mod modes;
 pub mod params;
+pub mod payload;
 pub mod shell;

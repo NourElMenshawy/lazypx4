@@ -7,6 +7,9 @@
 //! an RTK bring-up. Layers, lowest priority first: axes, trail (Braille),
 //! KML fence (yellow dots), planned queue path (cyan Braille), ROS navpath
 //! (blue Braille), LiDAR scan (height-coloured Braille), then the markers.
+//! Under all of it, once [i] fetched one, the satellite snapshot as
+//! truecolour half-blocks (two image pixels per cell, glyph cells darkened
+//! behind their glyph).
 
 use std::collections::HashMap;
 
@@ -65,6 +68,9 @@ pub const CELL_ASPECT: f64 = 2.0;
 fn n_over_e(w: usize, h: usize) -> f64 {
     (h / 2) as f64 * CELL_ASPECT / ((w / 2) as f64).max(1.0)
 }
+
+/// Background colour of the box (north, east, half-north, half-east) metres.
+type BgFn<'a> = &'a dyn Fn(f64, f64, f64, f64) -> Option<(u8, u8, u8)>;
 
 /// A character grid over the local N/E plane, with Braille sub-cells.
 /// Drawn to scale: `range` is the East half-extent, `range_n` the North one.
@@ -149,12 +155,36 @@ impl Grid {
         }
     }
 
-    fn lines(&self) -> Vec<Line<'static>> {
+    /// `bg(n, e, half_n, half_e)` is the background colour of that box.
+    fn lines(&self, bg: Option<BgFn>) -> Vec<Line<'static>> {
+        let (hw, hh) = ((self.w / 2) as f64, (self.h / 2) as f64);
+        let (dn, de) = (self.range_n / hh.max(1.0), self.range / hw.max(1.0));
+        let rgb = |(r, g, b): (u8, u8, u8)| Color::Rgb(r, g, b);
         self.cells
             .chunks(self.w)
-            .map(|row| {
+            .enumerate()
+            .map(|(r, row)| {
                 let mut spans = vec![Span::raw("  ")];
-                spans.extend(row.iter().map(|c| Span::styled(c.ch.to_string(), c.style)));
+                spans.extend(row.iter().enumerate().map(|(c, cell)| {
+                    let Some(bg) = bg else { return Span::styled(cell.ch.to_string(), cell.style) };
+                    let n = self.center.0 + (hh - r as f64) / hh * self.range_n;
+                    let e = self.center.1 + (c as f64 - hw) / hw * self.range;
+                    let top = bg(n + dn / 4.0, e, dn / 4.0, de / 2.0);
+                    let bot = bg(n - dn / 4.0, e, dn / 4.0, de / 2.0);
+                    match (cell.layer, top, bot) {
+                        (_, None, None) => Span::styled(cell.ch.to_string(), cell.style),
+                        (Layer::Empty, Some(t), Some(b)) => Span::styled("▀", Style::new().fg(rgb(t)).bg(rgb(b))),
+                        (Layer::Empty, Some(t), None) => Span::styled("▀", Style::new().fg(rgb(t))),
+                        (Layer::Empty, None, Some(b)) => Span::styled("▄", Style::new().fg(rgb(b))),
+                        (_, t, b) => {
+                            // Darkened so the glyph stays readable on top.
+                            let (t, b) = (t.or(b).unwrap(), b.or(t).unwrap());
+                            let mix = |x: u8, y: u8| ((x as u16 + y as u16) * 3 / 10) as u8;
+                            let style = cell.style.bg(Color::Rgb(mix(t.0, b.0), mix(t.1, b.1), mix(t.2, b.2)));
+                            Span::styled(cell.ch.to_string(), if cell.style.fg.is_none() { style.fg(TEXT) } else { style })
+                        }
+                    }
+                }));
                 Line::from(spans)
             })
             .collect()
@@ -181,7 +211,7 @@ fn wrap_keys(keys: &[&str], width: usize, sep: &str) -> Vec<String> {
 const MAP_KEYS: &[&str] = &[
     "[g] goto", "[W] wp queue", "[C] coverage", "[P] publish gps", "[x] jog", "[o] load kml",
     "[O] upload fence", "[+]/[-] zoom", "[arrows] pan", "[u] follow", "[0] reset", "[f] fit kml", "[t] trail", "[c] clear",
-    "[V] lidar", "[B] lidar frame", "[N] navpath", "[i] sat", "[n] back", "ESC panels",
+    "[V] lidar", "[B] lidar frame", "[N] navpath", "[i] sat", "[I] sat on/off", "[n] back", "ESC panels",
 ];
 
 fn baseline_text(m: f64) -> String {
@@ -423,7 +453,12 @@ pub fn draw(ctx: &Ctx) -> Vec<Line<'static>> {
         if st.map_download_active {
             vec![Ln::new().fg(format!(" Satellite image: {} ({:.0}s)...", st.map_download_status, t - st.map_download_started_at), YELLOW).line()]
         } else if st.map_download_status == "COMPLETE" && !st.map_download_path.is_empty() {
-            vec![Ln::new().fg(format!(" Satellite image saved: {}", st.map_download_path), GREEN).line()]
+            let shown = match (&st.map_satellite, st.map_satellite_hidden) {
+                (Some(_), false) => Ln::new().dim("   drawn under the grid · [I] hide"),
+                (Some(_), true) => Ln::new().dim("   hidden · [I] show"),
+                _ => Ln::new(),
+            };
+            vec![Ln::new().fg(format!(" Satellite image saved: {}", st.map_download_path), GREEN).spans(shown.0).line()]
         } else if st.map_download_status == "ERROR" && !st.map_download_error.is_empty() {
             vec![Ln::new().fg(format!(" Satellite image failed: {}", st.map_download_error), RED).line()]
         } else {
@@ -611,7 +646,17 @@ pub fn draw(ctx: &Ctx) -> Vec<Line<'static>> {
     }
     lines.push(header.line());
     lines.push(blank());
-    lines.extend(grid.lines());
+    // Satellite background: local N/E -> lat/lon (inverse of
+    // geo::global_to_local) -> snapshot pixels.
+    let sat = st.map_satellite.as_deref().filter(|_| !st.map_satellite_hidden).zip(origin);
+    let sat_bg = sat.map(|(img, (olat, olon))| {
+        let r = geo::EARTH_RADIUS_M;
+        let cos0 = olat.to_radians().cos().max(0.05);
+        move |n: f64, e: f64, half_n: f64, half_e: f64| {
+            img.sample(olat + (n / r).to_degrees(), olon + (e / (r * cos0)).to_degrees(), half_n, half_e)
+        }
+    });
+    lines.extend(grid.lines(sat_bg.as_ref().map(|f| f as BgFn)));
     lines.push(blank());
 
     lines.push(

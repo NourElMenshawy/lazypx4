@@ -20,8 +20,8 @@ use crate::tlog::{Player, Recorder};
 
 /// We announce ourselves as a ground station: system 255 (the pymavlink /
 /// QGC convention) and MAV_COMP_ID_MISSIONPLANNER.
-const GCS_SYSTEM_ID: u8 = 255;
-const GCS_COMPONENT_ID: u8 = 190;
+pub const GCS_SYSTEM_ID: u8 = 255;
+pub const GCS_COMPONENT_ID: u8 = 190;
 
 enum Source {
     Udp(UdpSocket),
@@ -173,7 +173,13 @@ impl Link {
 
     /// COMMAND_LONG to the locked vehicle.
     pub fn command_long(&self, command: mav::MavCmd, params: [f32; 7]) -> bool {
-        let (target_system, target_component) = self.target();
+        self.command_long_to(self.target().1, command, params)
+    }
+
+    /// COMMAND_LONG to another component of the locked system (a MAVLink
+    /// camera, say).
+    pub fn command_long_to(&self, target_component: u8, command: mav::MavCmd, params: [f32; 7]) -> bool {
+        let target_system = self.target().0;
         self.send(&MavMessage::COMMAND_LONG(mav::COMMAND_LONG_DATA {
             param1: params[0],
             param2: params[1],

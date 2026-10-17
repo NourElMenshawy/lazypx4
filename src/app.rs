@@ -29,6 +29,7 @@ pub enum Screen {
     Shell,
     Host,
     Control,
+    Payload,
     Calibration,
     Firmware,
     About,
@@ -47,6 +48,7 @@ pub const NAV_ITEMS: &[(Screen, &str, Option<char>)] = &[
     (Screen::Shell, "NSH SHELL", Some('t')),
     (Screen::Host, "USB / NETWORK", Some('u')),
     (Screen::Control, "CONTROL", Some('c')),
+    (Screen::Payload, "PAYLOAD", Some('o')),
     (Screen::Calibration, "CALIBRATE", Some('s')),
     (Screen::Firmware, "FLASH FIRMWARE", Some('f')),
     (Screen::About, "ABOUT", None),
@@ -62,6 +64,7 @@ impl Screen {
             Screen::Firmware => "PX4 FIRMWARE FLASH",
             Screen::Parameters => "PX4 PARAMETERS",
             Screen::Control => "PX4 CONTROL / SETPOINTS · RC",
+            Screen::Payload => "PAYLOAD · GIMBAL · CAMERA · GRIPPER / WINCH · ACTUATORS",
             Screen::Map => "PX4 MISSION · plan view, up = North",
             Screen::Calibration => "PX4 SENSOR CALIBRATION",
             Screen::Shell => "PX4 MAVLINK SHELL · NSH",
@@ -115,6 +118,11 @@ pub enum Action {
     FlashFirmware(std::path::PathBuf, String),
     /// `:!cmd` / `:sh` while armed.
     HostShell(crate::app_cmd::HostRun),
+    /// true = grab.
+    Gripper(bool),
+    Winch(crate::mav::payload::WinchAction),
+    /// 0-based output, -1..1, and optionally (seconds, then).
+    Actuator(usize, f32, Option<(f64, f32)>),
 }
 
 #[derive(Debug, Clone)]
@@ -140,6 +148,11 @@ pub enum InputKind {
     ParamSave,
     ParamLoad,
     ParamDiff,
+    GimbalRoi,
+    CaptureInterval,
+    Gripper,
+    Winch,
+    Actuator,
 }
 
 pub struct Confirm {
@@ -179,6 +192,9 @@ pub struct Session {
     pub param_edit: Option<(String, String)>,
 
     pub flight_log_index: usize,
+
+    /// Arrow-key gimbal step on the payload screen, degrees.
+    pub gimbal_step: f64,
 
     /// Keyboard jog on the map screen.
     pub jog_armed: bool,
@@ -228,6 +244,7 @@ impl Session {
             param_page: 18,
             param_edit: None,
             flight_log_index: 0,
+            gimbal_step: GIMBAL_STEP_DEG,
             jog_armed: false,
             jog_step: JOG_STEP_M,
             jog_last: 0.0,
@@ -311,7 +328,7 @@ const STARTUP_NOTES: &[&str] = &[
     "[T] takeoff  [L] land  [R] return-to-launch  [F] offboard on/off  (or pick the mode with [m])",
     "Use [m] MODE for all other PX4 flight-mode changes",
     "Press [p] for PX4 parameters ([/] to search)",
-    "Press [c] control/setpoints, [s] sensor calibration",
+    "Press [c] control/setpoints, [s] sensor calibration, [o] payload (gimbal, camera, gripper, winch)",
     "Press [l] for PX4 flight logs, [t] for the NSH shell",
     "Press [n] for the mission map: goto, jog, KML overlay, waypoint queue, fence upload",
     "Press [u] for USB / network, [f] to flash firmware",
@@ -486,6 +503,9 @@ impl App {
         }
 
         service_vehicle(&self.link, &mut st, &self.settings);
+        if self.session.screen == Screen::Payload {
+            crate::mav::payload::poll_camera(&self.link, &mut st);
+        }
         drop(st);
 
         // The [P] banner on the map expires like the dashboard's PREARM one.
@@ -555,6 +575,11 @@ impl App {
                     InputKind::LidarTopic => self.lidar_topic_submit(&input.buffer),
                     InputKind::ParamSave => self.param_save_submit(&input.buffer),
                     InputKind::ParamLoad => self.param_load_submit(&input.buffer),
+                    InputKind::GimbalRoi => self.gimbal_roi_submit(&input.buffer),
+                    InputKind::CaptureInterval => self.capture_interval_submit(&input.buffer),
+                    InputKind::Gripper => self.gripper_submit(&input.buffer),
+                    InputKind::Winch => self.winch_submit(&input.buffer),
+                    InputKind::Actuator => self.actuator_submit(&input.buffer),
                     InputKind::ParamDiff => {
                         let files: Vec<String> = input.buffer.split_whitespace().map(str::to_string).collect();
                         if !files.is_empty() {
@@ -733,6 +758,15 @@ impl App {
                 state::lock(shared).command("JOG armed - w/s up/down, k/j fwd/back, a/d strafe, h/l yaw, [/] step");
             }
             Action::HostShell(run) => self.session.host_run = Some(run),
+            Action::Gripper(grab) => {
+                crate::mav::payload::send_gripper(link, shared, grab);
+            }
+            Action::Winch(action) => {
+                crate::mav::payload::send_winch(link, shared, action);
+            }
+            Action::Actuator(index, value, timer) => {
+                crate::mav::payload::send_actuator(link, shared, index, value, timer);
+            }
             Action::FlashFirmware(fw, port) => {
                 crate::jobs::start_firmware_flash(&self.jobs, shared, &self.settings.tools_dir, &fw, &port);
             }
@@ -924,6 +958,7 @@ impl App {
                 }
             }
             Screen::Firmware => self.refresh_firmware_lists(),
+            Screen::Payload => self.request_payload_streams(),
             _ => {}
         }
     }
@@ -1094,11 +1129,14 @@ impl App {
         }
 
         // On the map j/k are jog keys while jog is armed - it normalises
-        // them itself once jog is off.
-        let key = if param_editing || self.session.screen == Screen::Map { key } else { normalize_vim_key(key) };
+        // them itself once jog is off. The payload screen tells j/k
+        // (scroll) from the arrows (gimbal) itself.
+        let raw_keys = matches!(self.session.screen, Screen::Map | Screen::Payload);
+        let key = if param_editing || raw_keys { key } else { normalize_vim_key(key) };
 
         match self.session.screen {
             Screen::Map => self.handle_map_key(key),
+            Screen::Payload => self.handle_payload_key(key),
             Screen::Host => self.handle_host_key(&key),
             Screen::Firmware => self.handle_firmware_key(&key),
             Screen::Parameters => self.handle_parameter_key(&key),
@@ -1672,6 +1710,7 @@ pub(crate) fn service_vehicle(link: &Arc<Link>, st: &mut State, settings: &Setti
     calibration::check_calibration(st);
     crate::mav::guided::check_fence_upload(st);
     crate::mav::mission::check_mission_upload(st);
+    crate::mav::payload::check_actuator_timers(link, st);
     update_health(st, settings.battery_low, settings.battery_critical);
     if t - st.trends.last_sample >= 1.0 && st.vehicle_locked {
         st.trends.last_sample = t;

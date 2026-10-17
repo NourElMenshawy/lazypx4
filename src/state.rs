@@ -379,6 +379,9 @@ pub struct State {
     pub servo_outputs: [u16; 8],
     pub last_servo_output: f64,
 
+    /// Gimbal, camera, gripper / winch, actuators ([o]).
+    pub payload: crate::mav::payload::Payload,
+
     pub fence_breach_status: u8,
     pub fence_breach_count: u16,
     pub last_fence_status: f64,
@@ -525,6 +528,9 @@ pub struct State {
     pub map_download_path: String,
     pub map_download_error: String,
     pub map_download_started_at: f64,
+    /// Last snapshot, drawn under the map grid unless [I] hid it.
+    pub map_satellite: Option<std::sync::Arc<crate::satellite::SatImage>>,
+    pub map_satellite_hidden: bool,
 }
 
 impl State {

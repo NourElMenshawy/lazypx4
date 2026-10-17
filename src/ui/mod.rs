@@ -12,6 +12,7 @@ pub mod preflight;
 mod lists;
 mod map;
 mod other;
+mod payload;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -316,6 +317,10 @@ fn build_screen(ctx: &Ctx, screen: Screen) -> (Vec<Line<'static>>, String) {
         ),
         Screen::Shell => (lists::shell(ctx), "ENTER run · ↑↓ history · ←→ edit · PGUP/PGDN scroll · CTRL-C interrupt · CTRL-L clear · ESC panels".into()),
         Screen::Control => (other::control(ctx), "[r] re-request streams · [c] back · ESC panels".into()),
+        Screen::Payload => (
+            payload::draw(ctx),
+            "←↑↓→ aim gimbal · [p] photo [i] interval [v] video · [g] gripper [w] winch [s] actuator · ? keys · [o] back".into(),
+        ),
         Screen::Calibration => (other::calibration(ctx), "[g]yro [a]ccel [l]evel [c]ompass [b]aro · [r] re-request · [s] back".into()),
         Screen::About => (other::about(), "ESC panels".into()),
         Screen::Preflight => (preflight::draw(ctx), "[y] back · ESC panels · ? keys".into()),

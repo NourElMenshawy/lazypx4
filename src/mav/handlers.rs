@@ -11,7 +11,7 @@ use mavlink::dialects::development::{MavMessage, *};
 
 use crate::config::*;
 use crate::link::{Link, from_char_array};
-use crate::mav::{calibration, flightlog, guided, mission, modes, params, shell};
+use crate::mav::{calibration, flightlog, guided, mission, modes, params, payload, shell};
 use crate::px4mode;
 use crate::state::{self, Shared, State, classify_statustext, now};
 
@@ -226,6 +226,13 @@ fn dispatch(st: &mut State, link: &Link, src_sys: u8, src_comp: u8, msg: &MavMes
                 d.servo5_raw, d.servo6_raw, d.servo7_raw, d.servo8_raw,
             ];
         }
+        M::GIMBAL_DEVICE_ATTITUDE_STATUS(d) => payload::handle_gimbal_attitude(st, d),
+        M::GIMBAL_MANAGER_INFORMATION(d) => payload::handle_gimbal_info(st, d),
+        M::GIMBAL_MANAGER_STATUS(d) => payload::handle_gimbal_status(st, d),
+        M::CAMERA_CAPTURE_STATUS(d) => payload::handle_capture_status(st, d),
+        M::CAMERA_IMAGE_CAPTURED(d) => payload::handle_image_captured(st, d),
+        M::CAMERA_TRIGGER(d) => payload::handle_camera_trigger(st, d),
+        M::WINCH_STATUS(d) => payload::handle_winch_status(st, d),
         M::FENCE_STATUS(d) => {
             st.last_fence_status = now();
             st.fence_breach_status = d.breach_status;
@@ -328,6 +335,11 @@ fn dispatch(st: &mut State, link: &Link, src_sys: u8, src_comp: u8, msg: &MavMes
 }
 
 fn heartbeat(st: &mut State, link: &Link, src_sys: u8, src_comp: u8, d: &HEARTBEAT_DATA) {
+    // A camera / gimbal says nothing about the vehicle (and some announce
+    // a real autopilot type).
+    if payload::handle_heartbeat(st, src_sys, src_comp, d.mavtype) {
+        return;
+    }
     let autopilot = d.autopilot as u32;
     if autopilot == MAV_AUTOPILOT_INVALID {
         // Another GCS / companion component, not the vehicle.
@@ -602,6 +614,13 @@ fn command_ack(st: &mut State, command: u32, result: u32) {
     // Stream-rate tweaks and one-shot requests are best-effort: a vehicle
     // without a second GPS or a rangefinder rejects some, which is expected.
     if command == 511 || command == 512 {
+        return;
+    }
+    if command == 187 && result == 0 {
+        payload::handle_actuator_ack(st);
+    }
+    // Gimbal aiming is acknowledged per arrow-key step; only failures matter.
+    if (command == 1000 || command == 1001) && result == 0 {
         return;
     }
 

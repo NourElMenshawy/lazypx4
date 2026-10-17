@@ -6,6 +6,7 @@
 mod app;
 mod app_cmd;
 mod app_map;
+mod app_payload;
 mod cmdline;
 mod config;
 mod fleet;

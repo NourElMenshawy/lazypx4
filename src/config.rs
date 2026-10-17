@@ -345,6 +345,33 @@ pub const STREAM_MESSAGE_INTERVALS: &[(u32, u32)] = &[
 /// saturate a low-baud serial link behind the companion computer.
 pub const CONFIGURE_STREAMS_PACING: Duration = Duration::from_millis(20);
 
+// ---------------------------------------------------------------------------
+// Payload ([o])
+// ---------------------------------------------------------------------------
+
+/// Asked for when the payload screen opens (rejected by a vehicle without
+/// that payload, which is fine).
+pub const PAYLOAD_MESSAGE_INTERVALS: &[(u32, u32)] = &[
+    (285, 200_000),   // GIMBAL_DEVICE_ATTITUDE_STATUS  5 Hz
+    (281, 1_000_000), // GIMBAL_MANAGER_STATUS          1 Hz
+    (9005, 1_000_000), // WINCH_STATUS                  1 Hz
+];
+/// Arrow-key gimbal step: default and the [ / ] limits, degrees.
+pub const GIMBAL_STEP_DEG: f64 = 5.0;
+pub const GIMBAL_STEP_MIN_DEG: f64 = 1.0;
+pub const GIMBAL_STEP_MAX_DEG: f64 = 45.0;
+/// Re-send DO_GIMBAL_MANAGER_CONFIGURE at most this often while the
+/// manager doesn't report us in control.
+pub const GIMBAL_CONTROL_RETRY_S: f64 = 2.0;
+/// CAMERA_CAPTURE_STATUS request period while the payload screen is open.
+pub const CAMERA_STATUS_POLL_S: f64 = 2.0;
+/// Longest `actuator N VALUE SECONDS` hold.
+pub const ACTUATOR_TIMER_MAX_S: f64 = 3600.0;
+/// A timed actuator's return command is repeated this often, this many
+/// times, until PX4 acknowledges it.
+pub const ACTUATOR_REVERT_RETRY_S: f64 = 1.0;
+pub const ACTUATOR_REVERT_TRIES: u32 = 10;
+
 pub const ESTIMATOR_PARAM_NAMES: &[&str] = &[
     "EKF2_HGT_REF",
     "EKF2_GPS_CTRL",
@@ -433,14 +460,28 @@ pub fn command_name(id: u32) -> String {
         176 => "DO_SET_MODE".into(),
         179 => "DO_SET_HOME".into(),
         185 => "FLIGHT_TERMINATION".into(),
+        187 => "DO_SET_ACTUATOR".into(),
         192 => "DO_REPOSITION".into(),
         193 => "DO_PAUSE_CONTINUE".into(),
+        195 => "DO_SET_ROI_LOCATION".into(),
+        197 => "DO_SET_ROI_NONE".into(),
+        203 => "DO_DIGICAM_CONTROL".into(),
+        211 => "DO_GRIPPER".into(),
+        214 => "DO_SET_CAM_TRIGG_INTERVAL".into(),
         241 => "PREFLIGHT_CALIBRATION".into(),
         246 => "PREFLIGHT_REBOOT_SHUTDOWN".into(),
         262 => "DO_SET_STANDARD_MODE".into(),
         400 => "COMPONENT_ARM_DISARM".into(),
         511 => "SET_MESSAGE_INTERVAL".into(),
         512 => "REQUEST_MESSAGE".into(),
+        1000 => "DO_GIMBAL_MANAGER_PITCHYAW".into(),
+        1001 => "DO_GIMBAL_MANAGER_CONFIGURE".into(),
+        2000 => "IMAGE_START_CAPTURE".into(),
+        2001 => "IMAGE_STOP_CAPTURE".into(),
+        2003 => "DO_TRIGGER_CONTROL".into(),
+        2500 => "VIDEO_START_CAPTURE".into(),
+        2501 => "VIDEO_STOP_CAPTURE".into(),
+        42600 => "DO_WINCH".into(),
         _ => format!("COMMAND_{id}"),
     }
 }

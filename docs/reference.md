@@ -15,6 +15,7 @@ Full list of keys, commands and options. Press `?` inside lazypx4 to see the key
 | `m` | Flight modes (legacy + PX4 v1.15+ Standard Modes) |
 | `n` | Mission map — see below |
 | `c` / `r` | Control setpoints / RC channels, wind, actuator outputs |
+| `o` | Payload — gimbal, camera, gripper / winch, actuators — see below |
 | `p` | Parameters — browse, search, edit, decoded values, key-parameter panel, `s` save / `l` load / `D` diff a param file |
 | `s` | Sensor calibration |
 | `l` | Flight logs — download `.ulg`, upload to flight review, `ecl_ekf` check |
@@ -59,6 +60,9 @@ Flight commands still ask for `type YES`.
 | `:nsh top once` | Run a line in the PX4 NSH shell |
 | `:diff saved.params` · `:diff a.params b.params` | Parameter differences, vs the vehicle or between files |
 | `:mission upload` · `:ack` · `:tlog` · `:replay speed 4` | Mission, alerts, recording, replay |
+| `:gimbal -30 20` · `:gimbal nadir` · `:gimbal roi LAT LON [ALT]` · `:gimbal lock on` | Aim the gimbal |
+| `:photo` · `:photo 2 10` · `:photo stop` · `:video` | Photo, interval capture (every 2 s, 10 images), video toggle |
+| `:grip grab` · `:winch deliver` · `:actuator 2 0.5` · `:actuator 2 1 10 -1` | Gripper, winch, Peripheral via Actuator Set — optionally for 10 s, then -1 (type YES) |
 | `:!cmd` · `:sh` | Run a command / open `$SHELL` on this computer |
 
 `:!` and `:sh` leave the TUI while the command runs. lazypx4 keeps
@@ -80,8 +84,38 @@ cross-check. Flight keys work here too.
 | `V` / `v` / `B` | LiDAR overlay / change topic / robot vs world frame |
 | `N` | ROS planned-path overlay |
 | `P` | Publish current position as `sensor_msgs/NavSatFix` on `/fire_gps_loc` |
-| `i` | Save a satellite snapshot |
+| `i` / `I` | Download a satellite snapshot (saved, and drawn under the map grid) / hide-show it |
 | arrows, `+`/`-`, `0`, `u`, `f` | Pan, zoom, reset, follow vehicle, fit to KML |
+
+### Payload (`o`)
+
+Gimbal and camera commands act at once; the gripper, winch and actuators
+ask for `YES`.
+
+| Key | |
+|-----|--|
+| arrows, `[` / `]` | Gimbal pitch / yaw by one step, halve / double the step |
+| `0` / `N` / `Y` | Center / point straight down / yaw follows the vehicle or locks to North |
+| `I` / `c` | Region of interest (`lat lon [alt]`, or `none`) / take gimbal control |
+| `p` / `i` / `v` | Photo / interval capture / video start-stop |
+| `g` / `w` / `s` | Gripper / winch / Peripheral via Actuator Set N |
+
+- **Gimbal** — Gimbal Protocol v2 through PX4's gimbal manager
+  (`MNT_MODE_IN` = MAVLink gimbal v2). lazypx4 claims primary control on the
+  first command.
+- **Camera** — a MAVLink camera component (heartbeat) gets the Camera
+  Protocol v2 commands; without one, stills and interval capture go through
+  PX4's `camera_trigger` (`TRIG_MODE`, `TRIG_INTERFACE`). Video needs a
+  MAVLink camera.
+- **Gripper** — `MAV_CMD_DO_GRIPPER`, handled by PX4's `payload_deliverer`.
+- **Winch** — `MAV_CMD_DO_WINCH` goes to a MAVLink winch component; PX4 has
+  no winch driver of its own.
+- **Actuators** — `MAV_CMD_DO_SET_ACTUATOR` drives the outputs assigned to
+  "Peripheral via Actuator Set 1-6" in PX4's actuator setup. `N VALUE SECONDS
+  [THEN]` holds VALUE for SECONDS, then sets THEN (default: the value lazypx4
+  last set, else -1). PX4 has no timed set, so lazypx4 sends the second
+  command itself and repeats it until PX4 acknowledges it — keep lazypx4
+  running and the link up until it has.
 
 ## Recording, replay and fleets
 

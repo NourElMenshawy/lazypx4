@@ -3,7 +3,8 @@
 //! key) covering the vehicle, home and any loaded KML overlay, annotated
 //! with pins, the fence, waypoint markers and a scale bar, plus a JSON
 //! sidecar recording where everything is. Background thread; needs
-//! internet.
+//! internet. The raw (unannotated) image is also kept in memory as the
+//! mission-map background ([`SatImage`]).
 
 use std::f64::consts::PI;
 use std::path::Path;
@@ -13,6 +14,42 @@ use image::{Rgb, RgbImage};
 use crate::config::*;
 use crate::geo;
 use crate::state::{self, Shared, now};
+
+/// The unannotated snapshot plus its EPSG:3857 bbox, for drawing it under
+/// the mission map grid.
+#[derive(Debug)]
+pub struct SatImage {
+    img: RgbImage,
+    bbox: [f64; 4],
+}
+
+impl SatImage {
+    /// Mean colour over the lat/lon box centred on (lat, lon) with the given
+    /// half-extents in metres (3x3 samples, so a zoomed-out cell doesn't
+    /// alias to one random pixel); `None` outside the image.
+    pub fn sample(&self, lat: f64, lon: f64, half_n: f64, half_e: f64) -> Option<(u8, u8, u8)> {
+        let [bx0, by0, bx1, by1] = self.bbox;
+        let (w, h) = (self.img.width() as f64, self.img.height() as f64);
+        let (cx, cy) = web_mercator(lat, lon);
+        let (px, py) = ((cx - bx0) / (bx1 - bx0) * w, (by1 - cy) / (by1 - by0) * h);
+        if !(0.0..w).contains(&px) || !(0.0..h).contains(&py) {
+            return None;
+        }
+        // Metres -> Mercator units (inflated by 1/cos(lat)) -> pixels.
+        let k = 1.0 / lat.to_radians().cos().max(0.05);
+        let (dx, dy) = (half_e * k / (bx1 - bx0) * w, half_n * k / (by1 - by0) * h);
+        let (mut sum, mut n) = ([0u32; 3], 0u32);
+        for i in [-2.0 / 3.0, 0.0, 2.0 / 3.0] {
+            for j in [-2.0 / 3.0, 0.0, 2.0 / 3.0] {
+                let (x, y) = ((px + dx * i).clamp(0.0, w - 1.0) as u32, (py + dy * j).clamp(0.0, h - 1.0) as u32);
+                let Rgb(c) = *self.img.get_pixel(x, y);
+                (0..3).for_each(|k| sum[k] += c[k] as u32);
+                n += 1;
+            }
+        }
+        Some(((sum[0] / n) as u8, (sum[1] / n) as u8, (sum[2] / n) as u8))
+    }
+}
 
 fn web_mercator(lat: f64, lon: f64) -> (f64, f64) {
     let r = geo::EARTH_RADIUS_M;
@@ -59,8 +96,9 @@ pub fn start(shared: &Shared, map_dir: &str) -> bool {
         let mut st = state::lock(&shared);
         st.map_download_active = false;
         match result {
-            Ok(path) => {
+            Ok((path, sat)) => {
                 st.map_download_status = "COMPLETE".into();
+                st.map_satellite = Some(std::sync::Arc::new(sat));
                 st.info(format!("Satellite image saved: {path}"));
                 st.map_download_path = path;
             }
@@ -74,7 +112,7 @@ pub fn start(shared: &Shared, map_dir: &str) -> bool {
     true
 }
 
-fn download(shared: &Shared, map_dir: &str, robot: (f64, f64), home: (f64, f64), kml: &geo::Kml) -> Result<String, String> {
+fn download(shared: &Shared, map_dir: &str, robot: (f64, f64), home: (f64, f64), kml: &geo::Kml) -> Result<(String, SatImage), String> {
     std::fs::create_dir_all(map_dir).map_err(|e| e.to_string())?;
     let (rx, ry) = web_mercator(robot.0, robot.1);
     let (hx, hy) = web_mercator(home.0, home.1);
@@ -128,7 +166,8 @@ fn download(shared: &Shared, map_dir: &str, robot: (f64, f64), home: (f64, f64),
     let distance = (rx - hx).hypot(ry - hy) * merc;
     let ground_res = span / size as f64 * merc;
 
-    let mut img = image::load_from_memory(&data).map_err(|e| format!("bad image: {e}"))?.to_rgb8();
+    let raw = image::load_from_memory(&data).map_err(|e| format!("bad image: {e}"))?.to_rgb8();
+    let mut img = raw.clone();
     annotate(&mut img, kml, &to_px, &web_mercator, home_px, robot_px, distance, ground_res, span * merc);
     img.save(&png_path).map_err(|e| e.to_string())?;
 
@@ -158,7 +197,7 @@ fn download(shared: &Shared, map_dir: &str, robot: (f64, f64), home: (f64, f64),
         });
     }
     std::fs::write(base.with_extension("json"), serde_json::to_string_pretty(&sidecar).unwrap()).map_err(|e| e.to_string())?;
-    Ok(png_path.display().to_string())
+    Ok((png_path.display().to_string(), SatImage { img: raw, bbox: [bx0, by0, bx1, by1] }))
 }
 
 // ---------------------------------------------------------------------------
