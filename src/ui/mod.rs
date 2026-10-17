@@ -10,7 +10,7 @@ mod help;
 mod hostui;
 pub mod preflight;
 mod lists;
-mod map;
+pub mod map;
 mod other;
 mod payload;
 
@@ -195,11 +195,14 @@ pub struct Ctx<'a> {
     pub width: usize,
     /// Rows per page a list screen settled on this frame (PGUP/PGDN step).
     pub page: std::cell::Cell<usize>,
+    /// The map screen's satellite image, on a kitty-graphics terminal.
+    pub map_image: std::cell::RefCell<Option<map::MapImage>>,
 }
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     frame.buffer_mut().set_style(area, base_style());
+    crate::kitty::want(None);
     if area.width < MIN_TERMINAL_COLS || area.height < MIN_TERMINAL_ROWS {
         frame.render_widget(
             Paragraph::new(vec![
@@ -258,16 +261,17 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     frame.render_widget(block, main);
 
     let screen = app.session.screen;
-    let (lines, footer, page) = {
+    let (lines, footer, page, map_image) = {
         let ctx = Ctx {
             st: &st,
             app,
             height: inner.height as usize,
             width: inner.width as usize,
             page: std::cell::Cell::new(0),
+            map_image: std::cell::RefCell::new(None),
         };
         let (lines, footer) = build_screen(&ctx, screen);
-        (lines, footer, ctx.page.get())
+        (lines, footer, ctx.page.get(), ctx.map_image.into_inner())
     };
 
     let mut scroll_note = String::new();
@@ -290,6 +294,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     drop(st);
     if app.session.help_open {
         help::draw(frame, body, screen, &mut app.session.help_scroll);
+    } else if let Some(img) = map_image {
+        let scroll = if screen.scrolls_as_page() { app.session.main_scroll } else { 0 };
+        crate::kitty::want(img.placement(inner.x, inner.y, scroll, inner.height as usize));
     }
 
     match screen {

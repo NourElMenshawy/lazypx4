@@ -8,13 +8,18 @@
 //! for every vehicle. ENTER stops a port's unit (freeing the port) and runs
 //! a full lazypx4 on it in the foreground; quitting that returns here and
 //! the unit restarts. The other vehicles are served the whole time.
+//!
+//! [n] swaps in a small map of every vehicle that has a GPS position, and
+//! [i] fetches one satellite snapshot framing them all to draw under it.
+//! The start-up `--kml` / `kml` overlay is drawn there too, and handed to
+//! every vehicle opened with ENTER.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::DefaultTerminal;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Modifier, Style, Stylize};
@@ -24,10 +29,11 @@ use ratatui::widgets::{Block, BorderType, Cell, Paragraph, Row, Table, TableStat
 use crate::app::GotoTarget;
 use crate::app_map::{Goto, parse_goto};
 use crate::config::*;
+use crate::lineedit::LineEdit;
 use crate::link::Link;
 use crate::mav::{commands, flightlog, modes};
 use crate::state::{self, Level, Shared, State, now};
-use crate::ui::{BLUE, CRUST, CYAN, GREEN, OVERLAY0, RED, SURFACE1, YELLOW, base_style};
+use crate::ui::{BLUE, CRUST, CYAN, GREEN, OVERLAY0, RED, SURFACE1, TEXT, YELLOW, base_style};
 
 /// "14560,14561" / "14560-14563" / a mix.
 pub fn parse_ports(text: &str) -> Result<Vec<u16>, String> {
@@ -153,8 +159,11 @@ enum Command {
     SetHome,
     EkfReset,
     Reboot,
-    /// Arm keyboard jog on this (single) vehicle.
+    /// Arm keyboard jog on the targets.
     Jog,
+    /// Several vehicles to one global point: the group's centre goes
+    /// there and each keeps its offset from it (lat, lon, amsl, yaw).
+    Formation(f64, f64, f64, Option<f64>),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -167,6 +176,8 @@ enum InputKind {
 enum Prompt {
     Input { kind: InputKind, text: String, targets: Vec<usize> },
     Confirm { text: String, buffer: String, command: Command, targets: Vec<usize> },
+    /// `:` command line (its text and history live in `Fleet::cmd_edit`).
+    Command { targets: Vec<usize> },
 }
 
 fn execute(unit: &Unit, command: &Command) {
@@ -196,6 +207,8 @@ fn execute(unit: &Unit, command: &Command) {
         Command::Goto(target) => {
             crate::app::send_goto(link, &mut state::lock(shared), target.clone());
         }
+        // Resolved per vehicle by `Fleet::formation`.
+        Command::Formation(..) => {}
         Command::Offboard => {
             let enter = state::lock(shared).mode != "OFFBOARD";
             commands::send_offboard(link, shared, enter);
@@ -229,6 +242,11 @@ fn execute(unit: &Unit, command: &Command) {
     }
 }
 
+/// The `:` commands the fleet view runs itself.
+const FLEET_COMMANDS: &str = "arm disarm takeoff [alt] land rtl hold kill mode NAME goto ... offboard sethome ekfreset reboot ack";
+const FLEET_COMMAND_NAMES: &[&str] =
+    &["arm", "disarm", "takeoff", "land", "rtl", "hold", "kill", "mode", "goto", "offboard", "sethome", "ekfreset", "reboot", "ack", "help"];
+
 /// "GO" / "GO 3w" / "NO-GO 2f" and its colour: the PREFLIGHT column and
 /// the arm confirmation.
 fn short_verdict(checks: &[crate::preflight::Check]) -> (String, Color) {
@@ -244,6 +262,16 @@ fn short_verdict(checks: &[crate::preflight::Check]) -> (String, Color) {
 enum Pane {
     Events,
     Preflight,
+    Map,
+}
+
+/// The fleet map's satellite snapshot ([i]), filled by a download thread.
+#[derive(Default)]
+struct FleetSat {
+    active: bool,
+    started_at: f64,
+    image: Option<Arc<crate::satellite::SatImage>>,
+    error: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -259,13 +287,23 @@ struct Fleet<'a> {
     note: String,
     jog: Option<Jog>,
     pane: Pane,
+    cmd_edit: LineEdit,
+    /// TAB matches shown on the `:` prompt's hint row.
+    cmd_candidates: Vec<String>,
+    /// Map zoom on top of fitting every vehicle ([+]/[-], [0] resets).
+    map_zoom: f64,
+    sat: Arc<Mutex<FleetSat>>,
+    sat_hidden: bool,
+    /// The start-up KML / .plan overlay (`settings.kml_path`), if it loaded.
+    kml: Option<crate::geo::Kml>,
     /// Companion-computer stats - one host, shared by every row's preflight.
     sys: Arc<Mutex<crate::host::SystemStats>>,
 }
 
-/// Keyboard jog on one vehicle: every key is a DO_REPOSITION nudge.
+/// Keyboard jog on the targets: every key is a DO_REPOSITION nudge to
+/// each of them.
 struct Jog {
-    row: usize,
+    rows: Vec<usize>,
     step: f64,
     last: f64,
 }
@@ -352,27 +390,24 @@ impl Fleet<'_> {
             'K' => self.confirm("KILL MOTORS NOW (flight termination, even in flight) on", Command::Kill, targets),
             'T' => self.prompt = Some(Prompt::Input { kind: InputKind::Takeoff, text: String::new(), targets }),
             'm' => self.prompt = Some(Prompt::Input { kind: InputKind::Mode, text: String::new(), targets }),
-            // Several vehicles to one absolute point would collide, and a
-            // shared relative offset is rarely what's meant: one at a time.
-            'g' if targets.len() > 1 => self.note = "goto: one vehicle at a time (ESC clears the marks)".into(),
             'g' => self.prompt = Some(Prompt::Input { kind: InputKind::Goto, text: String::new(), targets }),
             'F' => self.confirm("OFFBOARD on/off (in OFFBOARD -> HOLD, else -> OFFBOARD; needs streaming setpoints) for", Command::Offboard, targets),
             'H' => self.confirm("Set HOME to the current position of", Command::SetHome, targets),
             'E' => self.confirm("RESET EKF (ekf stop / ekf start) on", Command::EkfReset, targets),
             'b' => self.confirm("REBOOT PX4 on", Command::Reboot, targets),
-            'x' if targets.len() > 1 => self.note = "jog: one vehicle at a time (ESC clears the marks)".into(),
             'x' => {
-                let st = state::lock(&self.slots[targets[0]].unit.as_ref().unwrap().shared);
-                let refuse = if !st.armed {
-                    Some("jog: arm the vehicle first")
-                } else if !st.global_pos_valid {
-                    Some("jog: needs a GPS / global position")
-                } else {
-                    None
-                };
-                drop(st);
+                let refuse = targets.iter().find_map(|&i| {
+                    let st = state::lock(&self.slots[i].unit.as_ref().unwrap().shared);
+                    if !st.armed {
+                        Some(format!("jog: arm {} first", self.slots[i].label()))
+                    } else if !st.global_pos_valid {
+                        Some(format!("jog: {} has no GPS / global position", self.slots[i].label()))
+                    } else {
+                        None
+                    }
+                });
                 match refuse {
-                    Some(r) => self.note = r.into(),
+                    Some(r) => self.note = r,
                     None => self.confirm(
                         "Arm keyboard JOG (w/s up/down, k/j fwd/back, a/d left/right, h/l yaw, [/] step, x/ESC stop) on",
                         Command::Jog,
@@ -411,20 +446,104 @@ impl Fleet<'_> {
             return;
         }
         jog.last = t;
-        let Some(unit) = &self.slots[jog.row].unit else {
-            self.jog = None;
-            return;
-        };
         let step = jog.step;
         let (f, r, d) = (f * step, r * step, d * step);
-        let mut st = state::lock(&unit.shared);
-        let yaw = (yaw_sign != 0.0).then(|| (st.yaw + yaw_sign * JOG_YAW_STEP_DEG).rem_euclid(360.0));
-        if crate::mav::guided::goto_body(&unit.link, &mut st, f, r, d, yaw, true) {
-            match yaw {
-                Some(y) => st.command(format!("JOG yaw -> {y:.0}")),
-                None => st.command(format!("JOG fwd {f:+.1} right {r:+.1} down {d:+.1} m")),
+        // Each vehicle in its own body frame; a vehicle whose port went
+        // away (opened elsewhere) is just skipped.
+        for unit in jog.rows.iter().filter_map(|&i| self.slots[i].unit.as_ref()) {
+            let mut st = state::lock(&unit.shared);
+            let yaw = (yaw_sign != 0.0).then(|| (st.yaw + yaw_sign * JOG_YAW_STEP_DEG).rem_euclid(360.0));
+            if crate::mav::guided::goto_body(&unit.link, &mut st, f, r, d, yaw, true) {
+                match yaw {
+                    Some(y) => st.command(format!("JOG yaw -> {y:.0}")),
+                    None => st.command(format!("JOG fwd {f:+.1} right {r:+.1} down {d:+.1} m")),
+                }
             }
         }
+    }
+
+    /// [Formation]: one global target per vehicle - the centre of the
+    /// group (horizontal and altitude) moves to the point, each vehicle
+    /// keeping its offset from that centre. Positions are taken now, at
+    /// YES, not when the goto was typed.
+    fn formation(&self, targets: &[usize], lat: f64, lon: f64, amsl: f64, yaw: Option<f64>) -> Result<Vec<(usize, GotoTarget)>, String> {
+        let mut positions = Vec::new();
+        for &i in targets {
+            let Some(unit) = &self.slots[i].unit else { continue };
+            let st = state::lock(&unit.shared);
+            if !st.global_pos_valid {
+                return Err(format!("goto: {} has no GPS / global position", self.slots[i].label()));
+            }
+            positions.push((i, st.global_lat, st.global_lon, st.global_alt));
+        }
+        let n = positions.len().max(1) as f64;
+        let (c_lat, c_lon, c_alt) = positions.iter().fold((0.0, 0.0, 0.0), |(a, b, c), p| (a + p.1 / n, b + p.2 / n, c + p.3 / n));
+        Ok(positions
+            .into_iter()
+            .map(|(i, la, lo, alt)| {
+                let (north, east) = crate::geo::global_to_local(la, lo, c_lat, c_lon);
+                let (t_lat, t_lon) = crate::geo::offset(lat, lon, north, east);
+                (i, GotoTarget::Global(t_lat, t_lon, amsl + alt - c_alt, yaw))
+            })
+            .collect())
+    }
+
+    /// Mark every live row, or unmark all if they already are.
+    fn toggle_mark_all(&mut self) {
+        let live: Vec<usize> = (0..self.slots.len()).filter(|&i| self.slots[i].unit.is_some()).collect();
+        let all = !live.is_empty() && live.iter().all(|&i| self.marked[i]);
+        self.marked.iter_mut().for_each(|m| *m = false);
+        if !all {
+            live.into_iter().for_each(|i| self.marked[i] = true);
+        }
+    }
+
+    /// A `:` line: the full UI's flight commands, each through the same
+    /// prompt / confirmation as its hotkey here.
+    fn submit_command(&mut self, line: &str, targets: Vec<usize>) {
+        let line = crate::cmdline::expand_alias(line, &self.settings.aliases);
+        let (word, args) = crate::cmdline::split(&line);
+        if word.is_empty() {
+            return;
+        }
+        let Some(spec) = crate::cmdline::lookup(&word) else {
+            self.note = format!(":{word}: unknown command");
+            return;
+        };
+        let key = match spec.name {
+            "arm" => 'a',
+            "disarm" => 'd',
+            "land" => 'L',
+            "rtl" => 'R',
+            "hold" => 'h',
+            "kill" => 'K',
+            "offboard" => 'F',
+            "sethome" => 'H',
+            "ekfreset" => 'E',
+            "reboot" => 'b',
+            "takeoff" => return self.submit_input(InputKind::Takeoff, args, targets),
+            "mode" if args.is_empty() => {
+                self.prompt = Some(Prompt::Input { kind: InputKind::Mode, text: String::new(), targets });
+                return;
+            }
+            "mode" => return self.submit_input(InputKind::Mode, args, targets),
+            "goto" => return self.submit_input(InputKind::Goto, args, targets),
+            "ack" => {
+                for u in self.slots.iter().filter_map(|s| s.unit.as_ref()) {
+                    state::lock(&u.shared).alerts.clear();
+                }
+                return;
+            }
+            "help" => {
+                self.note = FLEET_COMMANDS.into();
+                return;
+            }
+            other => {
+                self.note = format!(":{other} needs the full UI (ENTER) · fleet: {FLEET_COMMANDS}");
+                return;
+            }
+        };
+        self.command_key(key);
     }
 
     fn submit_input(&mut self, kind: InputKind, text: String, targets: Vec<usize>) {
@@ -444,7 +563,17 @@ impl Fleet<'_> {
                 self.confirm(&format!("Set mode {} on", text.trim()), Command::Mode(text.trim().to_string()), targets);
             }
             InputKind::Goto => match parse_goto(&text) {
+                Ok(Goto::Target(_, GotoTarget::Local(..))) if targets.len() > 1 => {
+                    self.note = "goto: every vehicle has its own local origin - use relative (r) or global (g) for several".into();
+                }
+                Ok(Goto::Target(prompt, GotoTarget::Global(lat, lon, amsl, yaw))) if targets.len() > 1 => {
+                    let prompt = prompt.replace("GOTO [global]", "GOTO [global, formation: the group's centre goes there, each keeps its offset]");
+                    let text = format!("{} - {}", self.names(&targets), prompt);
+                    let command = Command::Formation(lat, lon, amsl, yaw);
+                    self.prompt = Some(Prompt::Confirm { text, buffer: String::new(), command, targets });
+                }
                 Ok(Goto::Target(prompt, target)) => {
+                    let prompt = if targets.len() > 1 { prompt.replace("GOTO [relative]", "GOTO [relative, each in its own body frame]") } else { prompt };
                     let text = format!("{} - {}", self.names(&targets), prompt);
                     self.prompt = Some(Prompt::Confirm { text, buffer: String::new(), command: Command::Goto(target), targets });
                 }
@@ -454,9 +583,155 @@ impl Fleet<'_> {
         }
     }
 
+    /// [i]: one snapshot framing every vehicle with a position and its home.
+    fn fetch_satellite(&mut self) {
+        let points: Vec<(f64, f64)> = self
+            .slots
+            .iter()
+            .filter_map(|s| s.unit.as_ref())
+            .flat_map(|u| {
+                let st = state::lock(&u.shared);
+                let pos = st.global_pos_valid.then_some((st.global_lat, st.global_lon));
+                let home = (pos.is_some() && st.home_set).then_some((st.home_lat, st.home_lon));
+                pos.into_iter().chain(home).collect::<Vec<_>>()
+            })
+            .collect();
+        // Frame the overlay too, unless it is far from every vehicle.
+        let near = |&(la, lo): &(f64, f64)| points.iter().any(|&(pa, po)| crate::geo::distance_m(la, lo, pa, po) <= MAP_RANGE_MAX_M);
+        let overlay: Vec<(f64, f64)> = self
+            .kml
+            .iter()
+            .flat_map(|k| k.waypoints.iter().map(|w| (w.lat, w.lon)).chain(k.fence_rings.iter().flatten().copied()))
+            .filter(near)
+            .collect();
+        if points.is_empty() {
+            self.note = "satellite: no vehicle has a GPS position yet".into();
+            return;
+        }
+        {
+            let mut sat = self.sat.lock().unwrap_or_else(|e| e.into_inner());
+            if sat.active {
+                self.note = "satellite: a download is already running".into();
+                return;
+            }
+            sat.active = true;
+            sat.started_at = now();
+            sat.error.clear();
+        }
+        self.sat_hidden = false;
+        let points: Vec<(f64, f64)> = points.into_iter().chain(overlay).collect();
+        let (job, map_dir) = (self.sat.clone(), self.settings.map_dir.clone());
+        std::thread::spawn(move || {
+            let result = crate::satellite::fetch_around(&points, &map_dir);
+            let mut sat = job.lock().unwrap_or_else(|e| e.into_inner());
+            sat.active = false;
+            match result {
+                Ok((_, img)) => sat.image = Some(Arc::new(img)),
+                Err(e) => sat.error = e,
+            }
+        });
+    }
+
+    fn open_cmdline(&mut self) {
+        let targets = self.targets();
+        if targets.is_empty() {
+            self.note = "no vehicle there (port not open)".into();
+            return;
+        }
+        self.cmd_edit.clear();
+        self.cmd_candidates.clear();
+        self.prompt = Some(Prompt::Command { targets });
+    }
+
+    /// Same keys as the full UI's `:` line.
+    fn cmdline_key(&mut self, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let edit = &mut self.cmd_edit;
+        if key.code != KeyCode::Tab {
+            self.cmd_candidates.clear();
+        }
+        match key.code {
+            KeyCode::Esc => self.prompt = None,
+            KeyCode::Backspace if edit.text.is_empty() => self.prompt = None,
+            KeyCode::Backspace => edit.backspace(),
+            KeyCode::Delete => edit.delete(),
+            KeyCode::Left => edit.left(),
+            KeyCode::Right => edit.right(),
+            KeyCode::Home => edit.home(),
+            KeyCode::End => edit.end(),
+            KeyCode::Char('a') if ctrl => edit.home(),
+            KeyCode::Char('e') if ctrl => edit.end(),
+            KeyCode::Char('u') if ctrl => edit.clear(),
+            KeyCode::Up => edit.history_prev(),
+            KeyCode::Down => edit.history_next(),
+            KeyCode::Tab => self.complete_cmdline(),
+            KeyCode::Enter => {
+                let line = edit.submit();
+                if let Some(Prompt::Command { targets }) = self.prompt.take() {
+                    self.submit_command(&line, targets);
+                }
+            }
+            KeyCode::Char(c) if !ctrl => edit.insert(&c.to_string()),
+            _ => {}
+        }
+    }
+
+    fn complete_cmdline(&mut self) {
+        let Some(Prompt::Command { targets }) = &self.prompt else { return };
+        let edit = &self.cmd_edit;
+        let before: String = edit.text[..edit.cursor].iter().collect();
+        let word_start = before.rfind(char::is_whitespace).map(|i| i + 1).unwrap_or(0);
+        let word = &before[word_start..];
+        let words: Vec<&str> = before[..word_start].split_whitespace().collect();
+        let candidates = match words.as_slice() {
+            [] => crate::cmdline::prefix_matches(
+                word,
+                FLEET_COMMAND_NAMES.iter().copied().chain(self.settings.aliases.keys().map(String::as_str)),
+            ),
+            [first] => match crate::cmdline::lookup(first).map(|c| c.name) {
+                // Every mode any of the targets offers.
+                Some("mode") => {
+                    let mut labels = std::collections::BTreeSet::new();
+                    for unit in targets.iter().filter_map(|&i| self.slots[i].unit.as_ref()) {
+                        let st = state::lock(&unit.shared);
+                        labels.extend(modes::mode_options(&st).iter().map(|o| crate::cmdline::mode_word(&o.label)));
+                    }
+                    crate::cmdline::prefix_matches(word, labels.iter().map(String::as_str))
+                }
+                Some("offboard") => crate::cmdline::prefix_matches(word, ["on", "off"]),
+                Some("help") => crate::cmdline::prefix_matches(word, FLEET_COMMAND_NAMES.iter().copied()),
+                _ => Vec::new(),
+            },
+            _ => Vec::new(),
+        };
+        let start = before[..word_start].chars().count();
+        self.cmd_edit.complete(start, &candidates);
+        if candidates.len() > 1 {
+            self.cmd_candidates = candidates;
+        }
+    }
+
+    /// The `:` prompt's first row: TAB matches, the usage of the command
+    /// being typed, or the fleet's command list.
+    fn cmdline_hint(&self) -> String {
+        if !self.cmd_candidates.is_empty() {
+            return self.cmd_candidates.join("  ");
+        }
+        let text: String = self.cmd_edit.text.iter().collect();
+        let (word, _) = crate::cmdline::split(&text);
+        if let Some(alias) = self.settings.aliases.get(&word) {
+            return format!("alias: {word} = {alias}");
+        }
+        match crate::cmdline::lookup(&word) {
+            Some(c) if FLEET_COMMAND_NAMES.contains(&c.name) => format!("{} - {}", c.usage, c.help),
+            _ => format!("{FLEET_COMMANDS} · TAB complete · ↑↓ history"),
+        }
+    }
+
     fn prompt_key(&mut self, code: KeyCode) {
         let Some(prompt) = self.prompt.as_mut() else { return };
         match (code, prompt) {
+            (_, Prompt::Command { .. }) => {}
             (KeyCode::Esc, _) => self.prompt = None,
             (KeyCode::Backspace, Prompt::Input { text, .. } | Prompt::Confirm { buffer: text, .. }) => {
                 text.pop();
@@ -482,8 +757,22 @@ impl Fleet<'_> {
                 if let Some(Prompt::Confirm { command, targets, .. }) = self.prompt.take() {
                     if let Command::Jog = command {
                         self.table.select(Some(targets[0]));
-                        self.jog = Some(Jog { row: targets[0], step: JOG_STEP_M, last: 0.0 });
+                        self.jog = Some(Jog { rows: targets, step: JOG_STEP_M, last: 0.0 });
                         self.note.clear();
+                        return;
+                    }
+                    if let Command::Formation(lat, lon, amsl, yaw) = command {
+                        match self.formation(&targets, lat, lon, amsl, yaw) {
+                            Ok(goals) => {
+                                for (i, goal) in goals {
+                                    if let Some(unit) = &self.slots[i].unit {
+                                        execute(unit, &Command::Goto(goal));
+                                    }
+                                }
+                                self.note = format!("formation goto sent to {} - replies below / in each row", self.names(&targets));
+                            }
+                            Err(e) => self.note = e,
+                        }
                         return;
                     }
                     for &i in &targets {
@@ -512,6 +801,9 @@ impl Fleet<'_> {
         if let Some(c) = config {
             command.arg("--config").arg(c);
         }
+        if let Some(k) = &self.settings.kml_path {
+            command.arg("--kml").arg(k);
+        }
         let status = crate::suspend::run_foreground(terminal, command, "", false, || {})?;
         self.note = match status {
             Ok(s) if s.success() => format!("back from port {port}"),
@@ -521,6 +813,20 @@ impl Fleet<'_> {
         self.slots[i].opened = false;
         self.slots[i].start(self.settings);
         Ok(())
+    }
+}
+
+/// The start-up overlay as the full UI's [o] reads it: a .kml, or a QGC
+/// .plan's waypoints + inclusion fences.
+fn load_overlay(path: &str) -> Result<crate::geo::Kml, String> {
+    let path = match path.trim().strip_prefix("~/") {
+        Some(rest) => format!("{}/{rest}", std::env::var("HOME").unwrap_or_default()),
+        None => path.trim().to_string(),
+    };
+    if path.to_lowercase().ends_with(".plan") {
+        crate::geo::parse_plan(&path).map(|p| p.overlay)
+    } else {
+        crate::geo::parse_kml(&path)
     }
 }
 
@@ -534,8 +840,23 @@ pub fn run(terminal: &mut DefaultTerminal, settings: &Settings, ports: &[u16], c
         note: String::new(),
         jog: None,
         pane: Pane::Events,
+        cmd_edit: LineEdit::default(),
+        cmd_candidates: Vec::new(),
+        map_zoom: 1.0,
+        sat: Arc::default(),
+        sat_hidden: false,
+        kml: None,
         sys: Arc::new(Mutex::new(crate::host::SystemStats::default())),
     };
+    if let Some(path) = &settings.kml_path {
+        match load_overlay(path) {
+            Ok(kml) => {
+                fleet.note = format!("overlay {path}: {} waypoint(s), {} fence ring(s)", kml.waypoints.len(), kml.fence_rings.len());
+                fleet.kml = Some(kml);
+            }
+            Err(e) => fleet.note = format!("overlay {path} failed: {e}"),
+        }
+    }
     let sysmon_stop = Arc::new(AtomicBool::new(false));
     {
         let (sys, disk, sd) = (fleet.sys.clone(), settings.disk_path.clone(), sysmon_stop.clone());
@@ -558,6 +879,7 @@ pub fn run(terminal: &mut DefaultTerminal, settings: &Settings, ports: &[u16], c
         }
         fleet.request_preflight_params();
         terminal.draw(|f| draw(f, &mut fleet))?;
+        crate::kitty::flush();
 
         if !event::poll(FRAME_PERIOD)? {
             continue;
@@ -568,6 +890,10 @@ pub fn run(terminal: &mut DefaultTerminal, settings: &Settings, ports: &[u16], c
         }
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             break;
+        }
+        if matches!(fleet.prompt, Some(Prompt::Command { .. })) {
+            fleet.cmdline_key(key);
+            continue;
         }
         if fleet.prompt.is_some() {
             fleet.prompt_key(key.code);
@@ -588,6 +914,8 @@ pub fn run(terminal: &mut DefaultTerminal, settings: &Settings, ports: &[u16], c
                 fleet.table.select(Some((i + 1) % n));
             }
             KeyCode::Esc => fleet.marked.iter_mut().for_each(|m| *m = false),
+            KeyCode::Char('v') => fleet.toggle_mark_all(),
+            KeyCode::Char(':') => fleet.open_cmdline(),
             KeyCode::Char('A') => {
                 for u in fleet.slots.iter().filter_map(|s| s.unit.as_ref()) {
                     state::lock(&u.shared).alerts.clear();
@@ -595,8 +923,16 @@ pub fn run(terminal: &mut DefaultTerminal, settings: &Settings, ports: &[u16], c
             }
             KeyCode::Enter => fleet.open(terminal, config)?,
             KeyCode::Char('y') => {
-                fleet.pane = if fleet.pane == Pane::Events { Pane::Preflight } else { Pane::Events };
+                fleet.pane = if fleet.pane == Pane::Preflight { Pane::Events } else { Pane::Preflight };
             }
+            KeyCode::Char('n') => {
+                fleet.pane = if fleet.pane == Pane::Map { Pane::Events } else { Pane::Map };
+            }
+            KeyCode::Char('i') => fleet.fetch_satellite(),
+            KeyCode::Char('I') => fleet.sat_hidden = !fleet.sat_hidden,
+            KeyCode::Char('+' | '=') => fleet.map_zoom = (fleet.map_zoom * 1.5).min(500.0),
+            KeyCode::Char('-') => fleet.map_zoom = (fleet.map_zoom / 1.5).max(0.05),
+            KeyCode::Char('0') => fleet.map_zoom = 1.0,
             KeyCode::Char(c) => fleet.command_key(c),
             _ => {}
         }
@@ -633,6 +969,9 @@ struct RowData {
     /// Newest non-INFO event: replies to commands, warnings.
     last: Option<(Level, String)>,
     verdict: (String, Color),
+    yaw: f64,
+    pos: Option<(f64, f64)>,
+    home: Option<(f64, f64)>,
 }
 
 fn row_data(st: &State, sys: &crate::host::SystemStats, settings: &Settings) -> RowData {
@@ -658,7 +997,64 @@ fn row_data(st: &State, sys: &crate::host::SystemStats, settings: &Settings) -> 
         alt: st.local_pos_valid.then_some(-st.local_z),
         alert: st.alerts.last().map(|(_, t)| t.clone()),
         last: st.events.iter().rev().find(|e| e.level != Level::Info).map(|e| (e.level, e.message.clone())),
+        yaw: st.yaw,
+        pos: st.global_pos_valid.then_some((st.global_lat, st.global_lon)),
+        home: st.home_set.then_some((st.home_lat, st.home_lon)),
     }
+}
+
+/// [n]: every vehicle with a position - heading arrow + its sys id
+/// (red: alert, cyan: marked, green: armed; the selected one reversed) and
+/// its home `H`.
+fn map_widget<'a>(fleet: &Fleet, data: &[Option<RowData>], area: ratatui::layout::Rect) -> Paragraph<'a> {
+    let dim = Style::new().add_modifier(Modifier::DIM);
+    let selected = fleet.selected();
+    let pins: Vec<crate::ui::map::FleetPin> = data
+        .iter()
+        .enumerate()
+        .filter_map(|(i, d)| {
+            let d = d.as_ref()?;
+            let (lat, lon) = d.pos?;
+            let id = if d.sys != 0 { d.sys as u32 } else { i as u32 + 1 };
+            let color = if d.alert.is_some() {
+                RED
+            } else if fleet.marked[i] {
+                CYAN
+            } else if d.armed {
+                GREEN
+            } else {
+                TEXT
+            };
+            let mut style = Style::new().fg(color);
+            if i == selected {
+                style = style.add_modifier(Modifier::REVERSED);
+            }
+            Some(crate::ui::map::FleetPin { lat, lon, yaw: d.yaw, label: char::from_digit(id % 36, 36).unwrap_or('?'), style, home: d.home })
+        })
+        .collect();
+    let sat = fleet.sat.lock().unwrap_or_else(|e| e.into_inner());
+    let image = sat.image.as_ref().filter(|_| !fleet.sat_hidden);
+    let (w, h) = (area.width.saturating_sub(4) as usize, area.height.saturating_sub(2) as usize);
+    let (lines, range, map_image) = crate::ui::map::fleet_map(w, h, &pins, fleet.kml.as_ref(), fleet.map_zoom, image);
+    crate::kitty::want(map_image.and_then(|m| m.placement(area.x + 1, area.y + 1, 0, h)));
+    let lines = if pins.is_empty() { vec![Line::styled(" no vehicle has a GPS position yet", dim)] } else { lines };
+    let sat_note = if sat.active {
+        format!("satellite {:.0}s... ", now() - sat.started_at)
+    } else if !sat.error.is_empty() {
+        format!("satellite failed: {} ", sat.error)
+    } else if sat.image.is_some() && fleet.sat_hidden {
+        "satellite hidden ".into()
+    } else {
+        String::new()
+    };
+    let title = format!(" MAP · {} on map · E ±{range:.0} m · {sat_note}", pins.len());
+    Paragraph::new(lines).block(
+        Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(dim)
+            .title(title)
+            .title_bottom(Line::styled(" [+]/[-] zoom [0] fit · [i] satellite [I] hide · [n] close ", dim)),
+    )
 }
 
 fn level_style(level: Level) -> Style {
@@ -682,6 +1078,7 @@ fn draw(frame: &mut ratatui::Frame, fleet: &mut Fleet) {
     .areas(frame.area());
     let full = frame.area();
     frame.buffer_mut().set_style(full, base_style());
+    crate::kitty::want(None);
     let flash = (now() * 2.0) as i64 % 2 == 0;
     let dim = Style::new().add_modifier(Modifier::DIM);
 
@@ -832,28 +1229,35 @@ fn draw(frame: &mut ratatui::Frame, fleet: &mut Fleet) {
             .border_style(dim)
             .title(format!(" PREFLIGHT · {} ", slot.label())),
     );
-    // Side by side when there's room, else [y] picks one.
+    // Side by side when there's room (the map replaces the preflight on
+    // the right), else [y] / [n] pick one.
     if detail.width >= 150 {
         let [left, right] = Layout::horizontal([Constraint::Min(40), Constraint::Length(84)]).areas(detail);
         frame.render_widget(events, left);
-        frame.render_widget(preflight, right);
-    } else if fleet.pane == Pane::Preflight {
-        frame.render_widget(preflight, detail);
+        if fleet.pane == Pane::Map {
+            frame.render_widget(map_widget(fleet, &data, right), right);
+        } else {
+            frame.render_widget(preflight, right);
+        }
     } else {
-        frame.render_widget(events, detail);
+        match fleet.pane {
+            Pane::Preflight => frame.render_widget(preflight, detail),
+            Pane::Map => frame.render_widget(map_widget(fleet, &data, detail), detail),
+            Pane::Events => frame.render_widget(events, detail),
+        }
     }
 
     let mut bar = match &fleet.jog {
         Some(j) => vec![Span::styled(
             format!(
                 " JOG {} · step {:.2} m · w/s up/down · k/j fwd/back · a/d left/right · h/l yaw · [/] step · x/ESC stop ",
-                fleet.slots[j.row].label(),
+                fleet.names(&j.rows),
                 j.step
             ),
             Style::new().bg(YELLOW).fg(CRUST).add_modifier(Modifier::BOLD),
         )],
         None => vec![Span::styled(
-            " [a]rm [d]isarm [T]akeoff [L]and [R]TL [h]old [g]oto [x]jog [m]ode o[F]fboard [H]ome [E]KF [b]reboot [K]ill · [y] preflight · SPACE mark · ENTER full UI · [A]ck · q",
+            " [a]rm [d]isarm [T]akeoff [L]and [R]TL [h]old [g]oto [x]jog [m]ode o[F]fboard [H]ome [E]KF [b]reboot [K]ill · [:]cmd · [y] preflight · [n] map · SPACE mark · [v] all · ENTER full UI · [A]ck · q",
             dim,
         )],
     };
@@ -879,6 +1283,25 @@ fn draw(frame: &mut ratatui::Frame, fleet: &mut Fleet) {
                 vec![
                     Line::from(vec![Span::styled(" INPUT   ", bar), Span::raw("  "), Span::raw(ask)]),
                     Line::from(vec![Span::styled("   >     ", bar), Span::raw(format!("  {text}█   ")), Span::styled("ENTER submit · ESC cancel", dim)]),
+                ]
+            }
+            Prompt::Command { targets } => {
+                let edit = &fleet.cmd_edit;
+                let before: String = edit.text[..edit.cursor].iter().collect();
+                let under: String = edit.text.get(edit.cursor).map(|c| c.to_string()).unwrap_or_else(|| " ".into());
+                let after: String = edit.text.iter().skip(edit.cursor + 1).collect();
+                vec![
+                    Line::from(vec![
+                        Span::styled(" COMMAND ", bar),
+                        Span::raw(format!("  {}: ", fleet.names(targets))),
+                        Span::styled(fleet.cmdline_hint(), dim),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("   :     ", bar),
+                        Span::raw(format!("  {before}")),
+                        Span::styled(under, Style::new().add_modifier(Modifier::REVERSED)),
+                        Span::raw(after),
+                    ]),
                 ]
             }
         };

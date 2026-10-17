@@ -22,6 +22,7 @@ pub fn run_foreground(
     use crossterm::{cursor, execute, terminal as term};
 
     let mut out = std::io::stdout();
+    crate::kitty::clear();
     term::disable_raw_mode()?;
     execute!(out, term::LeaveAlternateScreen, cursor::Show)?;
     if !banner.is_empty() {

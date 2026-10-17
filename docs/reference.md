@@ -84,7 +84,7 @@ cross-check. Flight keys work here too.
 | `V` / `v` / `B` | LiDAR overlay / change topic / robot vs world frame |
 | `N` | ROS planned-path overlay |
 | `P` | Publish current position as `sensor_msgs/NavSatFix` on `/fire_gps_loc` |
-| `i` / `I` | Download a satellite snapshot (saved, and drawn under the map grid) / hide-show it |
+| `i` / `I` | Download a satellite snapshot (saved, and drawn under the map grid: full resolution on kitty / Ghostty / WezTerm, half-blocks elsewhere or with `LAZYPX4_GRAPHICS=off`) / hide-show it |
 | arrows, `+`/`-`, `0`, `u`, `f` | Pan, zoom, reset, follow vehicle, fit to KML |
 
 ### Payload (`o`)
@@ -135,10 +135,14 @@ heartbeats to every vehicle the whole time.
 | Key | |
 |-----|--|
 | `j` / `k`, `SPACE` / `ESC` | Select / mark, unmark — commands go to the marked vehicles, else the selected one |
+| `v` | Mark every vehicle (again: unmark all) |
+| `:` | Command line for the targets: `arm`, `disarm`, `takeoff [alt]`, `land`, `rtl`, `hold`, `kill`, `mode NAME`, `goto ...`, `offboard`, `sethome`, `ekfreset`, `reboot`, `ack` (TAB completes, ↑/↓ history, aliases work; each still asks for YES) |
 | `a` `d` `T` `L` `R` `h` `K` | Arm (shows each vehicle's preflight verdict), disarm, takeoff, land, RTL, hold, kill |
 | `y` | Selected vehicle's preflight checklist (shown beside its events on wide terminals) |
+| `n` | Map of every vehicle with a GPS fix: heading arrow + sys id (red alert, cyan marked, green armed; selected reversed), homes `H`. `+` / `-` zoom, `0` fits them all again |
+| `i` / `I` | Satellite snapshot framing every vehicle, drawn under the map (saved to `--map-dir`) / hide-show it |
 | `m` / `F` / `H` / `E` / `b` | Mode (`posctl`, `hold`, `mission`, ...) / offboard toggle / set home / EKF reset / reboot |
-| `g` / `x` | Goto (same syntax as the map) / keyboard jog — one vehicle at a time |
+| `g` / `x` | Goto (same syntax as the map) / keyboard jog on the targets. Relative goto and jog move each vehicle in its own body frame; a global goto `g lat lon alt` to several moves them as a formation (the group's centre goes there, each keeps its offset, altitude included); local `l` is single-vehicle only (each has its own origin) |
 | `ENTER` | Full lazypx4 on that vehicle; `q` there returns to the fleet |
 | `A` / `q` | Acknowledge alerts / quit |
 

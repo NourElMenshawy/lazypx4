@@ -102,6 +102,26 @@ impl LineEdit {
         }
     }
 
+    /// TAB: replace the word before the cursor (from char `start`) - a
+    /// single candidate in full (plus a space unless it is a directory),
+    /// several by their common prefix, never shortening what was typed.
+    pub fn complete(&mut self, start: usize, candidates: &[String]) {
+        let replacement = match candidates {
+            [] => return,
+            [c] if c.ends_with('/') => c.clone(),
+            [c] => format!("{c} "),
+            _ => crate::cmdline::common_prefix(candidates),
+        };
+        let word_chars = self.cursor.saturating_sub(start);
+        if replacement.chars().count() < word_chars {
+            return;
+        }
+        for _ in 0..word_chars {
+            self.backspace();
+        }
+        self.insert(&replacement);
+    }
+
     fn load(&mut self, text: Vec<char>) {
         self.cursor = text.len();
         self.text = text;
@@ -128,5 +148,15 @@ mod tests {
         e.end();
         e.backspace();
         assert_eq!(e.text.iter().collect::<String>(), "xto");
+    }
+
+    #[test]
+    fn completes_the_word_before_the_cursor() {
+        let mut e = LineEdit::default();
+        e.insert("mode po");
+        e.complete(5, &["posctl".into(), "position".into()]);
+        assert_eq!(e.text.iter().collect::<String>(), "mode pos");
+        e.complete(5, &["posctl".into()]);
+        assert_eq!(e.text.iter().collect::<String>(), "mode posctl ");
     }
 }

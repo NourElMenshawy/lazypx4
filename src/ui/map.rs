@@ -9,15 +9,19 @@
 //! (blue Braille), LiDAR scan (height-coloured Braille), then the markers.
 //! Under all of it, once [i] fetched one, the satellite snapshot as
 //! truecolour half-blocks (two image pixels per cell, glyph cells darkened
-//! behind their glyph).
+//! behind their glyph) - or, on a kitty-graphics terminal, the image itself
+//! at full resolution under the cells it fully covers (see crate::kitty).
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use super::*;
 use crate::geo;
+use crate::kitty;
+use crate::satellite::SatImage;
 use crate::state::{LidarFrame, Target, now};
 
 pub const BRAILLE_BITS: [[u8; 4]; 2] = [[0x01, 0x02, 0x04, 0x40], [0x08, 0x10, 0x20, 0x80]];
@@ -155,8 +159,36 @@ impl Grid {
         }
     }
 
-    /// `bg(n, e, half_n, half_e)` is the background colour of that box.
-    fn lines(&self, bg: Option<BgFn>) -> Vec<Line<'static>> {
+    /// The block of cells lying entirely inside the snapshot, and the
+    /// snapshot pixels behind it, for drawing the image itself under them.
+    fn cover(&self, img: &SatImage, origin: (f64, f64)) -> Option<Cover> {
+        let (hw, hh) = ((self.w / 2) as f64, (self.h / 2) as f64);
+        let (dn, de) = (self.range_n / hh.max(1.0), self.range / hw.max(1.0));
+        // Outer edges of the grid (cells are centred on their n/e).
+        let (n_top, e_left) = (self.center.0 + (hh + 0.5) * dn, self.center.1 - (hw + 0.5) * de);
+        let (n_bot, e_right) = (n_top - self.h as f64 * dn, e_left + self.w as f64 * de);
+        let (x0, y0) = img.pixel_of(local_to_global(origin, n_top, 0.0).0, local_to_global(origin, 0.0, e_left).1);
+        let (x1, y1) = img.pixel_of(local_to_global(origin, n_bot, 0.0).0, local_to_global(origin, 0.0, e_right).1);
+        let (sx, sy) = ((x1 - x0) / self.w as f64, (y1 - y0) / self.h as f64);
+        if !(sx > 0.0 && sy > 0.0) {
+            return None;
+        }
+        let (iw, ih) = (img.rgb().width() as f64, img.rgb().height() as f64);
+        let span = |p0: f64, step: f64, size: f64, cells: usize| {
+            ((-p0 / step).ceil().clamp(0.0, cells as f64) as usize, ((size - p0) / step).floor().clamp(0.0, cells as f64) as usize)
+        };
+        let (c0, c1) = span(x0, sx, iw, self.w);
+        let (r0, r1) = span(y0, sy, ih, self.h);
+        (c1 > c0 && r1 > r0).then(|| Cover {
+            rows: (r0, r1),
+            cols: (c0, c1),
+            src: [x0 + c0 as f64 * sx, y0 + r0 as f64 * sy, (c1 - c0) as f64 * sx, (r1 - r0) as f64 * sy],
+        })
+    }
+
+    /// `bg(n, e, half_n, half_e)` is the background colour of that box;
+    /// empty cells inside `cover` keep the default background instead.
+    fn lines(&self, bg: Option<BgFn>, cover: Option<&Cover>) -> Vec<Line<'static>> {
         let (hw, hh) = ((self.w / 2) as f64, (self.h / 2) as f64);
         let (dn, de) = (self.range_n / hh.max(1.0), self.range / hw.max(1.0));
         let rgb = |(r, g, b): (u8, u8, u8)| Color::Rgb(r, g, b);
@@ -171,7 +203,9 @@ impl Grid {
                     let e = self.center.1 + (c as f64 - hw) / hw * self.range;
                     let top = bg(n + dn / 4.0, e, dn / 4.0, de / 2.0);
                     let bot = bg(n - dn / 4.0, e, dn / 4.0, de / 2.0);
+                    let covered = cover.is_some_and(|k| (k.rows.0..k.rows.1).contains(&r) && (k.cols.0..k.cols.1).contains(&c));
                     match (cell.layer, top, bot) {
+                        (Layer::Empty, _, _) if covered => Span::styled(" ", Style::new().bg(Color::Reset)),
                         (_, None, None) => Span::styled(cell.ch.to_string(), cell.style),
                         (Layer::Empty, Some(t), Some(b)) => Span::styled("▀", Style::new().fg(rgb(t)).bg(rgb(b))),
                         (Layer::Empty, Some(t), None) => Span::styled("▀", Style::new().fg(rgb(t))),
@@ -189,6 +223,145 @@ impl Grid {
             })
             .collect()
     }
+}
+
+/// Local N/E metres around `origin` -> lat/lon (inverse of
+/// geo::global_to_local).
+fn local_to_global((olat, olon): (f64, f64), n: f64, e: f64) -> (f64, f64) {
+    let r = geo::EARTH_RADIUS_M;
+    let cos0 = olat.to_radians().cos().max(0.05);
+    (olat + (n / r).to_degrees(), olon + (e / (r * cos0)).to_degrees())
+}
+
+/// Satellite background in a local N/E frame around `origin`.
+fn sat_background(img: &SatImage, origin: (f64, f64)) -> impl Fn(f64, f64, f64, f64) -> Option<(u8, u8, u8)> + '_ {
+    move |n: f64, e: f64, half_n: f64, half_e: f64| {
+        let (lat, lon) = local_to_global(origin, n, e);
+        img.sample(lat, lon, half_n, half_e)
+    }
+}
+
+/// Grid cells (rows r0..r1, cols c0..c1) drawn with the image itself, and
+/// the snapshot pixel rectangle [x, y, w, h] stretched over them.
+pub struct Cover {
+    rows: (usize, usize),
+    cols: (usize, usize),
+    src: [f64; 4],
+}
+
+/// The satellite image under a map grid whose top-left cell is at content
+/// `line`, column `col` of a panel.
+pub struct MapImage {
+    pub line: usize,
+    pub col: usize,
+    cover: Cover,
+    image: Arc<SatImage>,
+}
+
+impl MapImage {
+    /// The kitty placement for a panel whose content starts at screen
+    /// (`x`, `y`), scrolled by `scroll` lines and `height` lines tall.
+    pub fn placement(&self, x: u16, y: u16, scroll: usize, height: usize) -> Option<kitty::Placement> {
+        let Cover { rows: (r0, r1), cols: (c0, c1), src: [sx, sy, sw, sh] } = self.cover;
+        let per_row = sh / (r1 - r0) as f64;
+        // Content lines of the covered rows, clipped to the visible window.
+        let (top, bot) = ((self.line + r0).max(scroll), (self.line + r1).min(scroll + height));
+        if bot <= top {
+            return None;
+        }
+        let py = sy + (top - self.line - r0) as f64 * per_row;
+        let ph = (bot - top) as f64 * per_row;
+        let (x0, y0) = (sx.round() as u32, py.round() as u32);
+        let src = [x0, y0, ((sx + sw).round() as u32).saturating_sub(x0).max(1), ((py + ph).round() as u32).saturating_sub(y0).max(1)];
+        Some(kitty::Placement {
+            image: self.image.clone(),
+            col: x + (self.col + c0) as u16,
+            row: y + (top - scroll) as u16,
+            cols: (c1 - c0) as u16,
+            rows: (bot - top) as u16,
+            src,
+        })
+    }
+}
+
+/// One vehicle on the fleet map.
+pub struct FleetPin {
+    pub lat: f64,
+    pub lon: f64,
+    pub yaw: f64,
+    /// Drawn one cell East of the heading arrow.
+    pub label: char,
+    pub style: Style,
+    pub home: Option<(f64, f64)>,
+}
+
+/// The fleet view's map: every vehicle (arrow + label) and its home `H`,
+/// plus the start-up KML overlay (fence dots, numbered waypoints), framed
+/// together and divided by `zoom`, over the satellite snapshot if there is
+/// one. Returns the rows (`w` x `h` cells after the 2-column margin), the
+/// East half-extent in metres and, on a kitty-graphics terminal, the image
+/// to place under them.
+pub fn fleet_map(
+    w: usize,
+    h: usize,
+    pins: &[FleetPin],
+    kml: Option<&geo::Kml>,
+    zoom: f64,
+    sat: Option<&Arc<SatImage>>,
+) -> (Vec<Line<'static>>, f64, Option<MapImage>) {
+    let (w, h) = (w.max(4), h.max(2));
+    let points: Vec<(f64, f64)> = pins.iter().flat_map(|p| std::iter::once((p.lat, p.lon)).chain(p.home)).collect();
+    let Some(&origin) = points.first() else { return (Vec::new(), 0.0, None) };
+    let mut local: Vec<(f64, f64)> = points.iter().filter_map(|&(la, lo)| geo::to_local(la, lo, origin)).collect();
+
+    // KML geometry far from the vehicles (multi-site exports) is not framed.
+    let to_local = |&(la, lo): &(f64, f64)| geo::to_local(la, lo, origin);
+    let near = |p: &(f64, f64)| local.iter().any(|v| (p.0 - v.0).hypot(p.1 - v.1) <= MAP_RANGE_MAX_M);
+    let waypoints: Vec<(f64, f64)> =
+        kml.map(|k| k.waypoints.iter().filter_map(|w| to_local(&(w.lat, w.lon))).collect()).unwrap_or_default();
+    let rings: Vec<Vec<(f64, f64)>> = kml
+        .map(|k| k.fence_rings.iter().map(|r| r.iter().filter_map(to_local).collect::<Vec<_>>()).filter(|r| r.len() >= 3).collect())
+        .unwrap_or_default();
+    let geometry: Vec<(f64, f64)> = waypoints.iter().chain(rings.iter().flatten()).copied().filter(near).collect();
+    local.extend(geometry);
+    let (min_n, max_n) = local.iter().fold((f64::MAX, f64::MIN), |(a, b), p| (a.min(p.0), b.max(p.0)));
+    let (min_e, max_e) = local.iter().fold((f64::MAX, f64::MIN), |(a, b), p| (a.min(p.1), b.max(p.1)));
+    let center = ((min_n + max_n) / 2.0, (min_e + max_e) / 2.0);
+    let fit = ((max_e - min_e) / 2.0).max((max_n - min_n) / 2.0 / n_over_e(w, h)) * 1.25;
+    let range = (fit.max(10.0) / zoom).clamp(1.0, MAP_RANGE_MAX_M);
+
+    let mut grid = Grid::new(w, h, center, range);
+    let east_cell = range / (w / 2) as f64;
+    let cell_size = (range / ((w / 2).max(h / 2)) as f64).max(0.01);
+    for ring in &rings {
+        for (a, b) in ring.iter().zip(ring.iter().cycle().skip(1)).take(ring.len()) {
+            let steps = ((b.0 - a.0).hypot(b.1 - a.1) / cell_size).clamp(1.0, 400.0) as usize;
+            for i in 0..=steps {
+                let f = i as f64 / steps as f64;
+                grid.put(a.0 + (b.0 - a.0) * f, a.1 + (b.1 - a.1) * f, '.', Style::new().fg(YELLOW), Layer::Fence, &[Layer::Empty]);
+            }
+        }
+    }
+    for (i, &(n, e)) in waypoints.iter().enumerate() {
+        let digit = char::from_digit(((i + 1) % 10) as u32, 10).unwrap();
+        grid.marker(n, e, digit, Style::new().fg(MAUVE).add_modifier(Modifier::BOLD));
+    }
+    for p in pins {
+        if let Some((n, e)) = p.home.and_then(|(la, lo)| geo::to_local(la, lo, origin)) {
+            grid.marker(n, e, 'H', Style::new().fg(YELLOW));
+        }
+    }
+    for p in pins {
+        if let Some((n, e)) = geo::to_local(p.lat, p.lon, origin) {
+            grid.marker(n, e, heading_arrow(p.yaw), p.style.add_modifier(Modifier::BOLD));
+            grid.marker(n, e + east_cell, p.label, p.style);
+        }
+    }
+    let bg = sat.map(|img| sat_background(img, origin));
+    let image = sat.filter(|_| kitty::supported()).and_then(|img| {
+        grid.cover(img, origin).map(|cover| MapImage { line: 0, col: 2, cover, image: img.clone() })
+    });
+    (grid.lines(bg.as_ref().map(|f| f as BgFn), image.as_ref().map(|m| &m.cover)), range, image)
 }
 
 fn wrap_keys(keys: &[&str], width: usize, sep: &str) -> Vec<String> {
@@ -646,17 +819,13 @@ pub fn draw(ctx: &Ctx) -> Vec<Line<'static>> {
     }
     lines.push(header.line());
     lines.push(blank());
-    // Satellite background: local N/E -> lat/lon (inverse of
-    // geo::global_to_local) -> snapshot pixels.
-    let sat = st.map_satellite.as_deref().filter(|_| !st.map_satellite_hidden).zip(origin);
-    let sat_bg = sat.map(|(img, (olat, olon))| {
-        let r = geo::EARTH_RADIUS_M;
-        let cos0 = olat.to_radians().cos().max(0.05);
-        move |n: f64, e: f64, half_n: f64, half_e: f64| {
-            img.sample(olat + (n / r).to_degrees(), olon + (e / (r * cos0)).to_degrees(), half_n, half_e)
-        }
+    let sat = st.map_satellite.as_ref().filter(|_| !st.map_satellite_hidden).zip(origin);
+    let sat_bg = sat.map(|(img, origin)| sat_background(img, origin));
+    let image = sat.filter(|_| kitty::supported()).and_then(|(img, origin)| {
+        grid.cover(img, origin).map(|cover| MapImage { line: lines.len(), col: 2, cover, image: img.clone() })
     });
-    lines.extend(grid.lines(sat_bg.as_ref().map(|f| f as BgFn)));
+    lines.extend(grid.lines(sat_bg.as_ref().map(|f| f as BgFn), image.as_ref().map(|m| &m.cover)));
+    *ctx.map_image.borrow_mut() = image;
     lines.push(blank());
 
     lines.push(
@@ -879,4 +1048,60 @@ pub fn draw(ctx: &Ctx) -> Vec<Line<'static>> {
     lines.extend(satellite_lines());
     lines.extend(key_lines.into_iter().map(Line::from));
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fleet_map_draws_every_vehicle_and_home() {
+        let pin = |lat: f64, label, home| FleetPin { lat, lon: 11.0, yaw: 0.0, label, style: Style::new(), home };
+        // ~110 m apart North-South, the second with its home beside it.
+        let pins = [pin(46.0, '1', None), pin(46.001, '2', Some((46.0005, 11.0)))];
+        let (lines, range, _) = fleet_map(60, 20, &pins, None, 1.0, None);
+        let text: String = lines.iter().flat_map(|l| l.spans.iter().map(|s| s.content.to_string())).collect();
+        assert_eq!(lines.len(), 20);
+        assert_eq!(text.matches('↑').count(), 2);
+        assert!(text.contains('1') && text.contains('2') && text.contains('H'));
+        assert!(range > 10.0);
+    }
+
+    #[test]
+    fn fleet_map_draws_the_kml_overlay() {
+        let pins = [FleetPin { lat: 46.0, lon: 11.0, yaw: 0.0, label: 'a', style: Style::new(), home: None }];
+        let wp = |lat: f64, lon: f64| geo::Waypoint { lat, lon, alt: 0.0, name: String::new() };
+        let kml = geo::Kml {
+            // ~200 m North of the vehicle: framed. ~50 km away: ignored.
+            waypoints: vec![wp(46.0018, 11.0), wp(46.45, 11.0)],
+            fence_rings: vec![vec![(45.9995, 10.9995), (45.9995, 11.0005), (46.0005, 11.0005), (46.0005, 10.9995)]],
+            ground_alt: None,
+        };
+        let (lines, range, _) = fleet_map(60, 20, &pins, Some(&kml), 1.0, None);
+        let text: String = lines.iter().flat_map(|l| l.spans.iter().map(|s| s.content.to_string())).collect();
+        assert!(text.contains('1') && text.contains('.'));
+        assert!(range > 100.0 && range < 1000.0);
+    }
+
+    #[test]
+    fn kitty_cover_is_the_cells_inside_the_snapshot() {
+        let origin = (46.0, 11.0);
+        let (cx, cy) = crate::satellite::web_mercator(origin.0, origin.1);
+        let img = SatImage::new(image::RgbImage::new(100, 100), [cx - 500.0, cy - 500.0, cx + 500.0, cy + 500.0]);
+
+        // Well inside: every cell, centred on the image.
+        let k = Grid::new(21, 11, (0.0, 0.0), 100.0).cover(&img, origin).unwrap();
+        assert_eq!((k.rows, k.cols), ((0, 11), (0, 21)));
+        let [x, y, w, h] = k.src;
+        assert!((x + w / 2.0 - 50.0).abs() < 0.5 && (y + h / 2.0 - 50.0).abs() < 0.5);
+
+        // Wider than the image: only the middle cells, all within it.
+        let k = Grid::new(21, 11, (0.0, 0.0), 2000.0).cover(&img, origin).unwrap();
+        assert!(k.cols.0 > 0 && k.cols.1 < 21 && k.rows.0 > 0 && k.rows.1 < 11);
+        let [x, y, w, h] = k.src;
+        assert!(x >= 0.0 && y >= 0.0 && x + w <= 100.0 + 1e-9 && y + h <= 100.0 + 1e-9);
+
+        // Entirely off it.
+        assert!(Grid::new(21, 11, (5000.0, 0.0), 100.0).cover(&img, origin).is_none());
+    }
 }

@@ -13,6 +13,7 @@ mod fleet;
 mod geo;
 mod host;
 mod jobs;
+mod kitty;
 mod lineedit;
 mod link;
 mod mav;
@@ -220,6 +221,7 @@ fn main() -> std::process::ExitCode {
     if let Some(ports) = fleet_ports {
         let mut terminal = ratatui::init();
         let result = fleet::run(&mut terminal, &settings, &ports, settings.config_path.as_deref());
+        kitty::clear();
         ratatui::restore();
         return match result {
             Ok(()) => std::process::ExitCode::SUCCESS,
@@ -247,6 +249,7 @@ fn main() -> std::process::ExitCode {
     // ratatui::init() installs a panic hook that restores the terminal.
     let mut terminal = ratatui::init();
     let result = app.run(&mut terminal);
+    kitty::clear();
     ratatui::restore();
 
     match result {

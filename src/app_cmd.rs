@@ -117,26 +117,10 @@ impl App {
         let before: String = edit.text[..edit.cursor].iter().collect();
         let (start, candidates) = self.completion_candidates(&before);
         let start_chars = before[..start].chars().count();
-        let word_chars = edit.cursor - start_chars;
-        let replacement = match candidates.len() {
-            0 => return,
-            1 => {
-                let c = &candidates[0];
-                if c.ends_with('/') { c.clone() } else { format!("{c} ") }
-            }
-            _ => cmdline::common_prefix(&candidates),
-        };
+        self.session.cmd_edit.complete(start_chars, &candidates);
         if candidates.len() > 1 {
             self.session.cmd_candidates = candidates;
         }
-        if replacement.chars().count() < word_chars {
-            return;
-        }
-        let edit = &mut self.session.cmd_edit;
-        for _ in 0..word_chars {
-            edit.backspace();
-        }
-        edit.insert(&replacement);
     }
 
     /// The prompt's first row: the TAB candidates, the usage of the command

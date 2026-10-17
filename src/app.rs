@@ -463,6 +463,7 @@ impl App {
 
             if Instant::now() >= next_frame {
                 terminal.draw(|frame| ui::draw(frame, &mut self))?;
+                crate::kitty::flush();
                 next_frame = Instant::now() + FRAME_PERIOD;
             }
         }

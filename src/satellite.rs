@@ -21,17 +21,38 @@ use crate::state::{self, Shared, now};
 pub struct SatImage {
     img: RgbImage,
     bbox: [f64; 4],
+    id: u32,
 }
 
 impl SatImage {
+    pub(crate) fn new(img: RgbImage, bbox: [f64; 4]) -> Self {
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+        SatImage { img, bbox, id: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) }
+    }
+
+    /// Unique per snapshot (the kitty graphics image id).
+    pub fn id(&self) -> u32 {
+        self.id
+    }
+
+    pub fn rgb(&self) -> &RgbImage {
+        &self.img
+    }
+
+    /// Fractional pixel position of (lat, lon); may lie outside the image.
+    pub fn pixel_of(&self, lat: f64, lon: f64) -> (f64, f64) {
+        let [bx0, by0, bx1, by1] = self.bbox;
+        let (cx, cy) = web_mercator(lat, lon);
+        ((cx - bx0) / (bx1 - bx0) * self.img.width() as f64, (by1 - cy) / (by1 - by0) * self.img.height() as f64)
+    }
+
     /// Mean colour over the lat/lon box centred on (lat, lon) with the given
     /// half-extents in metres (3x3 samples, so a zoomed-out cell doesn't
     /// alias to one random pixel); `None` outside the image.
     pub fn sample(&self, lat: f64, lon: f64, half_n: f64, half_e: f64) -> Option<(u8, u8, u8)> {
         let [bx0, by0, bx1, by1] = self.bbox;
         let (w, h) = (self.img.width() as f64, self.img.height() as f64);
-        let (cx, cy) = web_mercator(lat, lon);
-        let (px, py) = ((cx - bx0) / (bx1 - bx0) * w, (by1 - cy) / (by1 - by0) * h);
+        let (px, py) = self.pixel_of(lat, lon);
         if !(0.0..w).contains(&px) || !(0.0..h).contains(&py) {
             return None;
         }
@@ -51,7 +72,7 @@ impl SatImage {
     }
 }
 
-fn web_mercator(lat: f64, lon: f64) -> (f64, f64) {
+pub(crate) fn web_mercator(lat: f64, lon: f64) -> (f64, f64) {
     let r = geo::EARTH_RADIUS_M;
     (r * lon.to_radians(), r * (PI / 4.0 + lat.clamp(-85.0, 85.0).to_radians() / 2.0).tan().ln())
 }
@@ -112,32 +133,25 @@ pub fn start(shared: &Shared, map_dir: &str) -> bool {
     true
 }
 
-fn download(shared: &Shared, map_dir: &str, robot: (f64, f64), home: (f64, f64), kml: &geo::Kml) -> Result<(String, SatImage), String> {
-    std::fs::create_dir_all(map_dir).map_err(|e| e.to_string())?;
-    let (rx, ry) = web_mercator(robot.0, robot.1);
-    let (hx, hy) = web_mercator(home.0, home.1);
-
-    // Frame everything, but ignore KML geometry more than MAP_RANGE_MAX_M
-    // from the robot/home area (multi-site exports would zoom out too far).
-    let (ref_x, ref_y) = ((rx + hx) / 2.0, (ry + hy) / 2.0);
-    let mut pts = vec![(rx, ry), (hx, hy)];
-    let near = |p: (f64, f64)| (p.0 - ref_x).hypot(p.1 - ref_y) <= MAP_RANGE_MAX_M;
-    pts.extend(kml.waypoints.iter().map(|w| web_mercator(w.lat, w.lon)).filter(|p| near(*p)));
-    pts.extend(kml.fence_rings.iter().flatten().map(|&(la, lo)| web_mercator(la, lo)).filter(|p| near(*p)));
+/// Square EPSG:3857 box around the (Mercator) points, padded and at least
+/// MAP_IMAGE_MIN_SPAN_M wide, and its span.
+fn frame(pts: &[(f64, f64)]) -> ([f64; 4], f64) {
     let (min_x, max_x) = pts.iter().fold((f64::MAX, f64::MIN), |(a, b), p| (a.min(p.0), b.max(p.0)));
     let (min_y, max_y) = pts.iter().fold((f64::MAX, f64::MIN), |(a, b), p| (a.min(p.1), b.max(p.1)));
     let (cx, cy) = ((min_x + max_x) / 2.0, (min_y + max_y) / 2.0);
     let span = ((max_x - min_x).max(max_y - min_y) * MAP_IMAGE_PAD).max(MAP_IMAGE_MIN_SPAN_M);
     let half = span / 2.0;
-    let (bx0, bx1, by0, by1) = (cx - half, cx + half, cy - half, cy + half);
-    let size = MAP_IMAGE_SIZE;
+    ([cx - half, cy - half, cx + half, cy + half], span)
+}
 
+/// One MAP_IMAGE_SIZE x MAP_IMAGE_SIZE PNG export of the box.
+fn fetch([bx0, by0, bx1, by1]: [f64; 4]) -> Result<Vec<u8>, String> {
+    let size = MAP_IMAGE_SIZE;
     let url = format!(
         "https://server.arcgisonline.com/arcgis/rest/services/World_Imagery/MapServer/export?\
          bbox={bx0:.2},{by0:.2},{bx1:.2},{by1:.2}&bboxSR=3857&imageSR=3857&size={size},{size}\
          &format=png&transparent=false&f=image"
     );
-    state::lock(shared).map_download_status = "DOWNLOADING".into();
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(std::time::Duration::from_secs(MAP_DOWNLOAD_TIMEOUT_S)))
         .build()
@@ -153,6 +167,40 @@ fn download(shared: &Shared, map_dir: &str, robot: (f64, f64), home: (f64, f64),
     if data.len() < 512 {
         return Err("imagery server returned no image".into());
     }
+    Ok(data)
+}
+
+/// The fleet map's snapshot: one image framing every (lat, lon), saved
+/// unannotated to `map_dir`. Blocking - run it on a thread.
+pub fn fetch_around(points: &[(f64, f64)], map_dir: &str) -> Result<(String, SatImage), String> {
+    std::fs::create_dir_all(map_dir).map_err(|e| e.to_string())?;
+    let pts: Vec<(f64, f64)> = points.iter().map(|&(la, lo)| web_mercator(la, lo)).collect();
+    let (bbox, _) = frame(&pts);
+    let data = fetch(bbox)?;
+    let img = image::load_from_memory(&data).map_err(|e| format!("bad image: {e}"))?.to_rgb8();
+    let stamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+    let path = Path::new(map_dir).join(format!("px4_fleet_map_{stamp}.png"));
+    img.save(&path).map_err(|e| e.to_string())?;
+    Ok((path.display().to_string(), SatImage::new(img, bbox)))
+}
+
+fn download(shared: &Shared, map_dir: &str, robot: (f64, f64), home: (f64, f64), kml: &geo::Kml) -> Result<(String, SatImage), String> {
+    std::fs::create_dir_all(map_dir).map_err(|e| e.to_string())?;
+    let (rx, ry) = web_mercator(robot.0, robot.1);
+    let (hx, hy) = web_mercator(home.0, home.1);
+
+    // Frame everything, but ignore KML geometry more than MAP_RANGE_MAX_M
+    // from the robot/home area (multi-site exports would zoom out too far).
+    let (ref_x, ref_y) = ((rx + hx) / 2.0, (ry + hy) / 2.0);
+    let mut pts = vec![(rx, ry), (hx, hy)];
+    let near = |p: (f64, f64)| (p.0 - ref_x).hypot(p.1 - ref_y) <= MAP_RANGE_MAX_M;
+    pts.extend(kml.waypoints.iter().map(|w| web_mercator(w.lat, w.lon)).filter(|p| near(*p)));
+    pts.extend(kml.fence_rings.iter().flatten().map(|&(la, lo)| web_mercator(la, lo)).filter(|p| near(*p)));
+    let (bbox, span) = frame(&pts);
+    let [bx0, by0, bx1, by1] = bbox;
+    let size = MAP_IMAGE_SIZE;
+    state::lock(shared).map_download_status = "DOWNLOADING".into();
+    let data = fetch(bbox)?;
 
     let stamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
     let base = Path::new(map_dir).join(format!("px4_map_{stamp}"));
@@ -197,7 +245,7 @@ fn download(shared: &Shared, map_dir: &str, robot: (f64, f64), home: (f64, f64),
         });
     }
     std::fs::write(base.with_extension("json"), serde_json::to_string_pretty(&sidecar).unwrap()).map_err(|e| e.to_string())?;
-    Ok((png_path.display().to_string(), SatImage { img: raw, bbox: [bx0, by0, bx1, by1] }))
+    Ok((png_path.display().to_string(), SatImage::new(raw, [bx0, by0, bx1, by1])))
 }
 
 // ---------------------------------------------------------------------------
