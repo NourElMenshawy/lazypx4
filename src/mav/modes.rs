@@ -150,32 +150,48 @@ pub fn mode_options(st: &State) -> Vec<ModeOption> {
 
 pub fn confirm_mode_option(link: &Link, shared: &Shared, option: &ModeOption) {
     let mut st = state::lock(shared);
+
     match &option.kind {
         ModeKind::Legacy(name) => {
             set_mode(link, &mut st, name);
         }
+
         ModeKind::Standard(value) => {
             if !vehicle_ready(&mut st, link) {
                 return;
             }
-            if link.command_long(MavCmd::MAV_CMD_DO_SET_STANDARD_MODE, [*value as f32, 0., 0., 0., 0., 0., 0.]) {
-                st.command(format!("DO_SET_STANDARD_MODE command SENT: {}", option.label));
+
+            if link.command_long(
+                MavCmd::MAV_CMD_DO_SET_STANDARD_MODE,
+                [*value as f32, 0., 0., 0., 0., 0., 0.],
+            ) {
+                st.command(format!(
+                    "DO_SET_STANDARD_MODE command SENT: {}",
+                    option.label
+                ));
             } else {
-                st.error(format!("Failed to set standard mode {}", option.label));
+                st.error(format!(
+                    "Failed to set standard mode {}",
+                    option.label
+                ));
             }
         }
         ModeKind::Custom(value) => {
             if !vehicle_ready(&mut st, link) {
                 return;
             }
-            if link.command_long(
-                MavCmd::MAV_CMD_DO_SET_MODE,
-                [MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, *value as f32, 0., 0., 0., 0., 0.],
-            ) {
-                st.command(format!("DO_SET_MODE command SENT: {}", option.label));
+            if link.send_custom_mode(*value) {
+                st.command(format!(
+                    "SET_MODE message SENT: {} (custom_mode={})",
+                    option.label, value
+                ));
             } else {
-                st.error(format!("Failed to set custom mode {}", option.label));
+                st.error(format!(
+                    "Failed to send SET_MODE for {}",
+                    option.label
+                ));
             }
         }
     }
 }
+

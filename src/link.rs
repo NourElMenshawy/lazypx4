@@ -162,6 +162,7 @@ impl Link {
             msg,
             MavMessage::COMMAND_LONG(_)
                 | MavMessage::COMMAND_INT(_)
+                | MavMessage::SET_MODE(_)
                 | MavMessage::SET_POSITION_TARGET_LOCAL_NED(_)
                 | MavMessage::SET_POSITION_TARGET_GLOBAL_INT(_)
         ) {
@@ -170,7 +171,44 @@ impl Link {
         self.record(&bytes);
         socket.send_to(&bytes, peer).is_ok()
     }
-
+    pub fn send_custom_mode(&self, custom_mode: u32) -> bool {
+        let Source::Udp(socket) = &self.source else {
+            return false;
+        };
+        let Some(peer) = *self.peer.lock().unwrap_or_else(|e| e.into_inner()) else {
+            return false;
+        };
+        let (target_system, _) = self.target();
+        if target_system == 0 {
+            return false;
+        }
+        // MAVLink 2 SET_MODE:
+        // // 10-byte header + 6-byte payload + 2-byte checksum.
+        let mut frame = [0u8; 18];
+        frame[0] = 0xFD; // MAVLink 2 magic
+        frame[1] = 6;    // Payload length
+        frame[4] = self.sequence.fetch_add(1, Ordering::Relaxed);
+        frame[5] = GCS_SYSTEM_ID;
+        frame[6] = GCS_COMPONENT_ID;
+        frame[7] = 11;   // SET_MODE message ID
+        // Payload: custom_mode (u32 LE), target_system, base_mode.
+        frame[10..14].copy_from_slice(&custom_mode.to_le_bytes());
+        frame[14] = target_system;
+        frame[15] = 1; // MAV_MODE_FLAG_CUSTOM_MODE_ENABLED
+        // SET_MODE has CRC_EXTRA = 89.
+        let crc = mavlink::calculate_crc(&frame[1..16], 89);
+        frame[16..18].copy_from_slice(&crc.to_le_bytes());
+        match socket.send_to(&frame, peer) {
+            Ok(n) if n == frame.len() => {
+                self.record(&frame);
+                *self.last_command_at
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = crate::state::now();
+                true
+            }
+            _ => false,
+        }
+    }
     /// COMMAND_LONG to the locked vehicle.
     pub fn command_long(&self, command: mav::MavCmd, params: [f32; 7]) -> bool {
         self.command_long_to(self.target().1, command, params)
@@ -194,6 +232,7 @@ impl Link {
             confirmation: 0,
         }))
     }
+
 }
 
 /// Every frame in one datagram / tlog record. Frames of messages the
